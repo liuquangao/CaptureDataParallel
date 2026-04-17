@@ -1,0 +1,59 @@
+dataset:
+  name: sage3d
+  stage_root: /home/leo/FusionLab/DataSets/spatialverse/SAGE-3D_InteriorGS_usda
+  interiorgs_root: /home/leo/FusionLab/DataSets/spatialverse/InteriorGS
+  selection:
+    # Modes:
+    # 1. single: collect a specified scene id (or a short explicit list)
+    # 2. random: randomly sample random_count scene ids
+    # 3. all: collect every .usda scene under stage_root
+    mode: random
+    scene_id: 839874
+    # scene_ids: [839874, 840013]
+    random_count: 128
+    random_seed: 2026
+
+scene:
+  character_usd_path: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
+  character_arm_drop_degrees: 75.0
+  occupancy_flip_x: true
+  occupancy_flip_y: true
+  occupancy_negate_xy: true
+  warmup_updates: 10
+  keep_scene_open_after_capture: true
+
+output:
+  root_dir: /home/leo/FusionLab/CaptureData/outputs
+
+num_positions: 4
+
+sampling:
+  seed: 2026
+
+score_field:
+  min_radius_m: 1.2
+  max_radius_m: 4.5
+  grid_step_m: 0.2
+  occupancy_full_visibility_width_m: 0.25
+  ray_tolerance_m: 0.08
+  capture_score_min: 0.1
+  capture_score_max: 0.65
+  max_capture_candidates: 16
+
+camera:
+  prim_path: /World/CollectorCamera
+  resolution: [600, 400]
+  camera_height: 0.4
+  warmup_updates: 8
+  visibility_settle_updates: 4
+  focus_distance: 400.0
+  # In this Isaac Sim setup, 1.5 produces the desired 15 mm lens effect.
+  focal_length: 1.8
+  horizontal_aperture: 3.6
+  vertical_aperture: 2.4
+  near_clipping_distance: 0.01
+  depth_unit: meters
+  look_direction_mode: look_at_target
+  debug_logging: false
+
+headless: true
