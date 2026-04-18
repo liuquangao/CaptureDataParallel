@@ -8,6 +8,7 @@ import random
 import shutil
 import sys
 from pathlib import Path
+from time import perf_counter
 
 import yaml
 
@@ -61,7 +62,7 @@ def ensure_output_dirs(output_root: str, scene_name: str) -> Path:
 
 def ensure_position_output_dirs(scene_root: Path, position_index: int) -> Path:
     pos_dir = scene_root / f"pos_{position_index:03d}"
-    for rel in ("rgb", "depth", "ground_mask", "score_map"):
+    for rel in ("rgb", "depth", "ground_mask", "score_map", "valid_mask"):
         (pos_dir / rel).mkdir(parents=True, exist_ok=True)
     return pos_dir
 
@@ -157,6 +158,7 @@ def _collect_single_position(
             geometry_root=geometry_root,
         )
 
+    score_field_start = perf_counter()
     score_field = generate_segmentation_score_field(
         occupancy_map=occupancy_map,
         person_position_xy=(
@@ -170,6 +172,8 @@ def _collect_single_position(
         visibility_batch_scorer=_segmentation_visibility_batch_scorer,
         occupancy_full_visibility_width_m=float(ring_cfg.get("occupancy_full_visibility_width_m", 0.25)),
     )
+    score_field_elapsed_sec = perf_counter() - score_field_start
+    print(f"  [Position {position_index:03d}] score_field_elapsed_sec: {score_field_elapsed_sec:.3f}", flush=True)
     if not score_field:
         raise RuntimeError(f"Score field is empty for position {position_index:03d}")
 
@@ -262,6 +266,7 @@ def _collect_single_position(
                 "depth_npy_path": _relpath(record.depth_npy_path, pos_dir),
                 "ground_mask_path": _relpath(record.ground_mask_path, pos_dir),
                 "score_map_path": _relpath(record.score_map_path, pos_dir),
+                "valid_mask_path": _relpath(record.valid_mask_path, pos_dir),
                 "reid_score": visibility_ratio,
                 "sampling_score": sampling_score,
                 "visible_person_pixels": int(record.visible_person_pixels),
@@ -292,6 +297,7 @@ def _collect_single_position(
                     "depth_npy_path": capture_records[0].depth_npy_path,
                     "ground_mask_path": capture_records[0].ground_mask_path,
                     "score_map_path": capture_records[0].score_map_path,
+                    "valid_mask_path": capture_records[0].valid_mask_path,
                     "metadata_path": str(metadata_path),
                     "scores_path": str(scores_path),
                     "visibility_ratio": capture_records[0].visibility_ratio,

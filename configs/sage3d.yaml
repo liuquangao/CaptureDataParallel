@@ -45,7 +45,7 @@ camera:
   resolution: [600, 400]
   camera_height: 0.4
   warmup_updates: 8
-  visibility_settle_updates: 4
+  visibility_settle_updates: 1
   focus_distance: 400.0
   # In this Isaac Sim setup, 1.5 produces the desired 15 mm lens effect.
   focal_length: 1.8
@@ -56,4 +56,4 @@ camera:
   look_direction_mode: look_at_target
   debug_logging: false
 
-headless: true
+headless: fasle

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import atan2, cos, sin
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 from PIL import Image
@@ -35,6 +36,7 @@ class CameraCaptureRecord:
     depth_npy_path: str
     ground_mask_path: str
     score_map_path: str
+    valid_mask_path: str
     visibility_ratio: float
     visible_person_pixels: int
     total_person_pixels: int
@@ -112,6 +114,11 @@ def _save_score_map(score_map: np.ndarray, path: Path) -> None:
     np.save(path, np.asarray(score_map, dtype=np.float32))
 
 
+def _save_valid_mask(mask: np.ndarray, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, np.asarray(mask, dtype=bool))
+
+
 def _compute_ground_mask(
     depth_m: np.ndarray,
     camera_position: tuple[float, float, float],
@@ -140,7 +147,8 @@ def _compute_ground_mask(
     v_coords = np.arange(height, dtype=np.float32)
     uu, vv = np.meshgrid(u_coords, v_coords)
 
-    forward = depth_arr
+    valid_depth = np.isfinite(depth_arr) & (depth_arr > 0.0)
+    forward = np.where(valid_depth, depth_arr, 0.0).astype(np.float32, copy=False)
     lateral = -(uu - cx) * forward / max(fx, 1e-6)
     vertical = -(vv - cy) * forward / max(fy, 1e-6)
 
@@ -151,14 +159,16 @@ def _compute_ground_mask(
     world_x = np.float32(camera_position[0]) + forward * cos_yaw - lateral * sin_yaw
     world_y = np.float32(camera_position[1]) + forward * sin_yaw + lateral * cos_yaw
     world_z = np.float32(camera_position[2]) + vertical
-    valid_depth = np.isfinite(forward) & (forward > 0.0)
-
     ground_mask = valid_depth & (np.abs(world_z - float(floor_z)) <= float(ground_tolerance_m))
     if occupancy_map is not None:
         occupancy_mask = np.zeros((height, width), dtype=bool)
         valid_rows, valid_cols = np.where(ground_mask)
         for row, col in zip(valid_rows.tolist(), valid_cols.tolist()):
-            occ_row, occ_col = occupancy_map.world_to_grid(float(world_x[row, col]), float(world_y[row, col]))
+            wx = float(world_x[row, col])
+            wy = float(world_y[row, col])
+            if not np.isfinite(wx) or not np.isfinite(wy):
+                continue
+            occ_row, occ_col = occupancy_map.world_to_grid(wx, wy)
             if not (0 <= occ_row < occupancy_map.height and 0 <= occ_col < occupancy_map.width):
                 continue
             if bool(occupancy_map.free_mask[occ_row, occ_col]):
@@ -215,11 +225,12 @@ def _compute_score_map(
     horizontal_aperture: float,
     vertical_aperture: float,
     depth_tolerance_m: float = 0.1,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     width, height = int(resolution[0]), int(resolution[1])
     score_map = np.zeros((height, width), dtype=np.float32)
+    valid_mask = np.zeros((height, width), dtype=bool)
     if score_field is None:
-        return score_map
+        return score_map, valid_mask
 
     depth_arr = np.asarray(depth_m, dtype=np.float32)
     if depth_arr.shape != (height, width):
@@ -252,9 +263,10 @@ def _compute_score_map(
         if abs(pixel_depth - float(point_depth)) > float(depth_tolerance_m):
             continue
 
+        valid_mask[row, col] = True
         score_map[row, col] = max(score_map[row, col], float(item.score))
 
-    return score_map
+    return score_map, valid_mask
 
 
 def _set_prim_visibility(stage, prim_path: str, visible: bool, recursive: bool = False) -> bool:
@@ -547,6 +559,7 @@ def capture_candidate_views(
         depth_npy_path = scene_dir / "depth" / f"{file_stem}.npy"
         ground_mask_path = scene_dir / "ground_mask" / f"{file_stem}.png"
         score_map_path = scene_dir / "score_map" / f"{file_stem}.npy"
+        valid_mask_path = scene_dir / "valid_mask" / f"{file_stem}.npy"
         _save_rgb(rgb, rgb_path)
         _save_depth(depth, depth_png_path, depth_npy_path)
         ground_mask = _compute_ground_mask(
@@ -563,20 +576,22 @@ def capture_candidate_views(
             ground_mask,
             ground_mask_path,
         )
+        score_map, valid_mask = _compute_score_map(
+            score_field=score_field,
+            depth_m=depth,
+            ground_mask=ground_mask,
+            camera_position=camera_position,
+            camera_orientation_wxyz=camera_orientation,
+            resolution=cfg.resolution,
+            focal_length=cfg.focal_length,
+            horizontal_aperture=cfg.horizontal_aperture,
+            vertical_aperture=cfg.vertical_aperture,
+        )
         _save_score_map(
-            _compute_score_map(
-                score_field=score_field,
-                depth_m=depth,
-                ground_mask=ground_mask,
-                camera_position=camera_position,
-                camera_orientation_wxyz=camera_orientation,
-                resolution=cfg.resolution,
-                focal_length=cfg.focal_length,
-                horizontal_aperture=cfg.horizontal_aperture,
-                vertical_aperture=cfg.vertical_aperture,
-            ),
+            score_map,
             score_map_path,
         )
+        _save_valid_mask(valid_mask, valid_mask_path)
 
         record = CameraCaptureRecord(
             index=idx,
@@ -587,6 +602,7 @@ def capture_candidate_views(
             depth_npy_path=str(depth_npy_path),
             ground_mask_path=str(ground_mask_path),
             score_map_path=str(score_map_path),
+            valid_mask_path=str(valid_mask_path),
             visibility_ratio=float(visibility_ratio),
             visible_person_pixels=int(visible_person_pixels),
             total_person_pixels=int(total_person_pixels),
