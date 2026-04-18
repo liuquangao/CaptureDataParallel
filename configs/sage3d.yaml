@@ -44,7 +44,7 @@ score_field:
   # Ring around the person used for score-field candidate generation
   min_radius_m: 1.2
   max_radius_m: 4.5
-  grid_step_m: 0.2
+  grid_step_m: 0.1
 
   # Camera candidates in the score field must keep this clearance from obstacles
   camera_min_obstacle_distance_m: 0.2
