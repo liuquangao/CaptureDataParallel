@@ -1,47 +1,92 @@
+# -----------------------------------------------------------------------------
+# Experiment Scope
+# Keep the random seeds near the sampling counts so one experiment is readable
+# from top to bottom:
+#   1. which scenes
+#   2. how many positions per scene
+#   3. how many final renders per position
+#   4. how dense / how large the score field is
+# -----------------------------------------------------------------------------
+
 dataset:
   name: sage3d
   stage_root: /home/leo/FusionLab/DataSets/spatialverse/SAGE-3D_InteriorGS_usda
   interiorgs_root: /home/leo/FusionLab/DataSets/spatialverse/InteriorGS
   selection:
     # Modes:
-    # 1. single: collect a specified scene id (or a short explicit list)
+    # 1. single: collect one specified scene_id (or a short explicit list)
     # 2. random: randomly sample random_count scene ids
-    # 3. all: collect every .usda scene under stage_root
+    # 3. all: collect every supported .usda scene
     mode: random
+
+    # Used when mode == single
     scene_id: 839875
     # scene_ids: [839874, 840013]
-    random_count: 128
+
+    # Used when mode == random
+    random_count: 512
     random_seed: 2026
+
+# Number of person placements collected per scene
+num_positions: 4
+
+sampling:
+  # Reproducibility seed for per-scene position / candidate sampling
+  seed: 2026
+
+  # Different pos_{xxx} in the same scene must be at least this far apart
+  min_position_distance_m: 3.0
+
+  # Character spawn point must keep this clearance from obstacles
+  character_min_obstacle_distance_m: 0.2
+
+score_field:
+  # Ring around the person used for score-field candidate generation
+  min_radius_m: 1.2
+  max_radius_m: 4.5
+  grid_step_m: 0.2
+
+  # Camera candidates in the score field must keep this clearance from obstacles
+  camera_min_obstacle_distance_m: 0.2
+
+  # Occupancy-based shortcut: if the full body width is cleanly visible,
+  # directly mark score=1.0 without segmentation scoring
+  occupancy_full_visibility_width_m: 0.25
+  ray_tolerance_m: 0.08
+
+  # Final render views are sampled only from this score range
+  capture_score_min: 0.20
+  capture_score_max: 0.65
+
+  # Number of final rendered observations per pos_{xxx}
+  max_capture_candidates: 16
+
+
+# -----------------------------------------------------------------------------
+# Scene / Character Setup
+# -----------------------------------------------------------------------------
 
 scene:
   character_usd_path: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
   character_arm_drop_degrees: 75.0
+
+  # Occupancy-map to Isaac-world transform
   occupancy_flip_x: true
   occupancy_flip_y: true
   occupancy_negate_xy: true
+
   warmup_updates: 10
   keep_scene_open_after_capture: true
 
 output:
   root_dir: /home/leo/FusionLab/CaptureData/outputs
 
-num_positions: 4
 
-sampling:
-  seed: 2026
-  min_position_distance_m: 3.0
-  character_min_obstacle_distance_m: 0.2
-
-score_field:
-  min_radius_m: 1.2
-  max_radius_m: 4.5
-  grid_step_m: 0.2
-  occupancy_full_visibility_width_m: 0.25
-  camera_min_obstacle_distance_m: 0.2
-  ray_tolerance_m: 0.08
-  capture_score_min: 0.1
-  capture_score_max: 0.65
-  max_capture_candidates: 16
+# -----------------------------------------------------------------------------
+# Cameras
+# scoring_camera: used only for score-field estimation
+# capture_camera: used only for final RGB/depth/score-map rendering
+# -----------------------------------------------------------------------------
 
 scoring_camera:
   prim_path: /World/ScoringCamera
@@ -49,15 +94,18 @@ scoring_camera:
   camera_height: 0.4
   warmup_updates: 8
   visibility_settle_updates: 4
+
   focus_distance: 400.0
-  # In this Isaac Sim setup, 1.5 produces the desired 15 mm lens effect.
+  # In this Isaac Sim setup, 1.8 produces the desired 15 mm lens effect.
   focal_length: 1.8
   horizontal_aperture: 3.6
   vertical_aperture: 2.4
   near_clipping_distance: 0.01
+
   depth_unit: meters
   look_direction_mode: look_at_target
   debug_logging: false
+
   enable_rgb: false
   enable_depth: false
   enable_instance_segmentation: true
@@ -68,18 +116,28 @@ capture_camera:
   camera_height: 0.4
   warmup_updates: 8
   visibility_settle_updates: 1
+
+  # Random left/right yaw offset so the person is not always centered
   yaw_jitter_margin: 0.1
+
   focus_distance: 400.0
-  # In this Isaac Sim setup, 1.5 produces the desired 15 mm lens effect.
+  # In this Isaac Sim setup, 1.8 produces the desired 15 mm lens effect.
   focal_length: 1.8
   horizontal_aperture: 3.6
   vertical_aperture: 2.4
   near_clipping_distance: 0.01
+
   depth_unit: meters
   look_direction_mode: look_at_target
   debug_logging: false
+
   enable_rgb: true
   enable_depth: true
   enable_instance_segmentation: true
+
+
+# -----------------------------------------------------------------------------
+# App Launch
+# -----------------------------------------------------------------------------
 
 headless: false
