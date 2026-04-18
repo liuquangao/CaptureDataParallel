@@ -29,12 +29,15 @@ num_positions: 4
 
 sampling:
   seed: 2026
+  min_position_distance_m: 3.0
+  character_min_obstacle_distance_m: 0.2
 
 score_field:
   min_radius_m: 1.2
   max_radius_m: 4.5
   grid_step_m: 0.2
   occupancy_full_visibility_width_m: 0.25
+  camera_min_obstacle_distance_m: 0.2
   ray_tolerance_m: 0.08
   capture_score_min: 0.1
   capture_score_max: 0.65

@@ -112,6 +112,7 @@ def iter_ring_camera_samples(
     min_radius_m: float,
     max_radius_m: float,
     grid_step_m: float,
+    min_obstacle_distance_m: float = 0.0,
 ):
     person_x, person_y = person_position_xy
     visited_cells: set[tuple[int, int]] = set()
@@ -123,6 +124,8 @@ def iter_ring_camera_samples(
         if not bool(occupancy_map.free_mask[row, col]):
             continue
         if occupancy_map.room_free_mask is not None and not bool(occupancy_map.room_free_mask[row, col]):
+            continue
+        if not occupancy_map._is_cell_clear_of_obstacles(int(row), int(col), float(min_obstacle_distance_m)):
             continue
         if (row, col) in visited_cells:
             continue
@@ -148,6 +151,7 @@ def generate_segmentation_score_field(
     grid_step_m: float,
     visibility_batch_scorer,
     occupancy_full_visibility_width_m: float = 0.25,
+    min_camera_obstacle_distance_m: float = 0.0,
 ) -> list[ScoreFieldPoint]:
     samples = list(
         iter_ring_camera_samples(
@@ -157,6 +161,7 @@ def generate_segmentation_score_field(
             min_radius_m=min_radius_m,
             max_radius_m=max_radius_m,
             grid_step_m=grid_step_m,
+            min_obstacle_distance_m=min_camera_obstacle_distance_m,
         )
     )
     if not samples:

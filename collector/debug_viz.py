@@ -139,9 +139,17 @@ def place_debug_character(
     seed: int = 0,
     character_usd_path: str = DEFAULT_CHARACTER_USD_PATH,
     arm_drop_degrees: float = 75.0,
+    min_obstacle_distance_m: float = 0.2,
+    existing_world_points_xy: list[tuple[float, float]] | None = None,
+    min_point_distance_m: float = 3.0,
 ) -> dict:
     rng = random.Random(seed)
-    char_x, char_y = occupancy_map.sample_room_free_world_point(rng)
+    char_x, char_y = occupancy_map.sample_room_free_world_point_with_constraints(
+        rng=rng,
+        min_obstacle_distance_m=float(min_obstacle_distance_m),
+        existing_world_points_xy=existing_world_points_xy,
+        min_point_distance_m=float(min_point_distance_m),
+    )
     floor_z = 0.0
 
     person_prim_path = _add_usd_reference_xform(

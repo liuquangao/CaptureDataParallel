@@ -68,6 +68,32 @@ class OccupancyMap:
         row = self.height - row_from_bottom - 1
         return row, col
 
+    def _disk_offsets(self, clearance_m: float) -> list[tuple[int, int]]:
+        radius_cells = int(math.ceil(float(clearance_m) / max(float(self.resolution), 1e-6)))
+        offsets: list[tuple[int, int]] = []
+        for d_row in range(-radius_cells, radius_cells + 1):
+            for d_col in range(-radius_cells, radius_cells + 1):
+                distance_m = ((float(d_row) * self.resolution) ** 2 + (float(d_col) * self.resolution) ** 2) ** 0.5
+                if distance_m <= float(clearance_m) + 1e-6:
+                    offsets.append((d_row, d_col))
+        return offsets
+
+    def _is_cell_clear_of_obstacles(self, row: int, col: int, clearance_m: float) -> bool:
+        if clearance_m <= 0.0:
+            return bool(self.free_mask[row, col])
+        if not (0 <= row < self.height and 0 <= col < self.width):
+            return False
+        if not bool(self.free_mask[row, col]):
+            return False
+        for d_row, d_col in self._disk_offsets(clearance_m):
+            n_row = int(row) + int(d_row)
+            n_col = int(col) + int(d_col)
+            if not (0 <= n_row < self.height and 0 <= n_col < self.width):
+                return False
+            if not bool(self.free_mask[n_row, n_col]):
+                return False
+        return True
+
     def sample_free_world_point(self, rng: random.Random | None = None) -> tuple[float, float]:
         rng = rng or random
         free_cells = np.argwhere(self.free_mask)
@@ -97,6 +123,46 @@ class OccupancyMap:
             world_xy = self.grid_to_world(int(row), int(col))
             return world_xy
         raise RuntimeError("Occupancy map contains no free cells inside room polygons")
+
+    def sample_room_free_world_point_with_constraints(
+        self,
+        rng: random.Random | None = None,
+        min_obstacle_distance_m: float = 0.0,
+        existing_world_points_xy: list[tuple[float, float]] | None = None,
+        min_point_distance_m: float = 0.0,
+    ) -> tuple[float, float]:
+        rng = rng or random
+        base_mask = self.room_free_mask if self.room_free_mask is not None else self.free_mask
+        candidate_cells = np.argwhere(base_mask)
+        if candidate_cells.size == 0:
+            raise RuntimeError("Occupancy map contains no eligible room-free cells")
+
+        indices = list(range(len(candidate_cells)))
+        rng.shuffle(indices)
+        existing_world_points_xy = existing_world_points_xy or []
+        min_point_distance_m = float(min_point_distance_m)
+
+        for idx in indices:
+            row, col = candidate_cells[idx]
+            row_i, col_i = int(row), int(col)
+            if not self._is_cell_clear_of_obstacles(row_i, col_i, float(min_obstacle_distance_m)):
+                continue
+            world_xy = self.grid_to_world(row_i, col_i)
+            if existing_world_points_xy:
+                too_close = False
+                for other_x, other_y in existing_world_points_xy:
+                    dx = float(world_xy[0]) - float(other_x)
+                    dy = float(world_xy[1]) - float(other_y)
+                    if (dx * dx + dy * dy) ** 0.5 < min_point_distance_m:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
+            return world_xy
+
+        raise RuntimeError(
+            "Occupancy map could not find a room-free point satisfying obstacle clearance and position spacing"
+        )
 
 
 @dataclass

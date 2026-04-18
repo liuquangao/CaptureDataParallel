@@ -114,6 +114,7 @@ def _collect_single_position(
     scene_cfg: dict,
     scene_root: Path,
     position_index: int,
+    existing_character_positions_xy: list[tuple[float, float]],
 ) -> tuple[Path, int]:
     sampling_cfg = cfg.get("sampling", {})
     base_camera_cfg_raw = cfg.get("camera", {})
@@ -142,6 +143,12 @@ def _collect_single_position(
             )
         ),
         arm_drop_degrees=float(scene_cfg.get("character_arm_drop_degrees", 75.0)),
+        min_obstacle_distance_m=float(sampling_cfg.get("character_min_obstacle_distance_m", 0.2)),
+        existing_world_points_xy=existing_character_positions_xy,
+        min_point_distance_m=float(sampling_cfg.get("min_position_distance_m", 3.0)),
+    )
+    existing_character_positions_xy.append(
+        (float(debug_character["position"][0]), float(debug_character["position"][1]))
     )
     print(f"  [Position {position_index:03d}] debug_character: {json.dumps(debug_character, ensure_ascii=True)}", flush=True)
 
@@ -200,6 +207,7 @@ def _collect_single_position(
         grid_step_m=float(ring_cfg.get("grid_step_m", 0.2)),
         visibility_batch_scorer=_segmentation_visibility_batch_scorer,
         occupancy_full_visibility_width_m=float(ring_cfg.get("occupancy_full_visibility_width_m", 0.25)),
+        min_camera_obstacle_distance_m=float(ring_cfg.get("camera_min_obstacle_distance_m", 0.2)),
     )
     score_field_elapsed_sec = perf_counter() - score_field_start
     print(f"  [Position {position_index:03d}] score_field_elapsed_sec: {score_field_elapsed_sec:.3f}", flush=True)
@@ -505,6 +513,7 @@ def collect_scene(simulation_app, cfg: dict, scene_cfg: dict, keep_scene_open: b
         raise ValueError("num_positions must be > 0")
     print(f"[Step 3] collecting {num_positions} person positions in scene", flush=True)
     total_captures = 0
+    existing_character_positions_xy: list[tuple[float, float]] = []
     for position_index in range(num_positions):
         print(f"[Position {position_index:03d}] start", flush=True)
         pos_dir, capture_count = _collect_single_position(
@@ -516,6 +525,7 @@ def collect_scene(simulation_app, cfg: dict, scene_cfg: dict, keep_scene_open: b
             scene_cfg=scene_cfg,
             scene_root=scene_root,
             position_index=position_index,
+            existing_character_positions_xy=existing_character_positions_xy,
         )
         total_captures += capture_count
         print(f"[Position {position_index:03d}] saved to {pos_dir} ({capture_count} views)", flush=True)

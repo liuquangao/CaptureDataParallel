@@ -573,6 +573,7 @@ def capture_candidate_views(
         _set_prim_visibility(stage, "/World/scene_collision", visible=False, recursive=True)
     elif layers["geometry_root"]:
         _set_prim_visibility(stage, layers["geometry_root"], visible=False, recursive=True)
+    _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
     for camera_position, camera_orientation in poses:
         _set_camera_pose(camera, camera_position, camera_orientation)
         _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
@@ -586,6 +587,7 @@ def capture_candidate_views(
         _set_prim_visibility(stage, "/World/scene_collision", visible=True, recursive=True)
     elif layers["geometry_root"]:
         _set_prim_visibility(stage, layers["geometry_root"], visible=True, recursive=True)
+    _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
     for camera_position, camera_orientation in poses:
         _set_camera_pose(camera, camera_position, camera_orientation)
         _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
