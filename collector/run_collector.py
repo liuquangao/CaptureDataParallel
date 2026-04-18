@@ -62,13 +62,47 @@ def ensure_output_dirs(output_root: str, scene_name: str) -> Path:
 
 def ensure_position_output_dirs(scene_root: Path, position_index: int) -> Path:
     pos_dir = scene_root / f"pos_{position_index:03d}"
-    for rel in ("rgb", "depth", "ground_mask", "score_map", "valid_mask"):
+    for rel in ("rgb", "depth", "ground_mask", "score_map", "valid_mask", "yaw_map"):
         (pos_dir / rel).mkdir(parents=True, exist_ok=True)
     return pos_dir
 
 
 def _relpath(path: str | Path, root: Path) -> str:
     return str(Path(path).resolve().relative_to(root.resolve()))
+
+
+def _build_camera_config(camera_cfg_raw: dict, debug_character: dict) -> CameraCaptureConfig:
+    return CameraCaptureConfig(
+        prim_path=camera_cfg_raw.get("prim_path", "/World/CollectorCamera"),
+        resolution=tuple(camera_cfg_raw.get("resolution", [600, 400])),
+        camera_height=float(camera_cfg_raw.get("camera_height", 0.4)),
+        visibility_settle_updates=int(camera_cfg_raw.get("visibility_settle_updates", camera_cfg_raw.get("warmup_updates", 8))),
+        focus_distance=float(camera_cfg_raw.get("focus_distance", 400.0)),
+        focal_length=float(camera_cfg_raw.get("focal_length", 15.0)),
+        horizontal_aperture=float(camera_cfg_raw.get("horizontal_aperture", 3.6)),
+        vertical_aperture=float(camera_cfg_raw.get("vertical_aperture", 2.4)),
+        near_clipping_distance=float(camera_cfg_raw.get("near_clipping_distance", 0.01)),
+        depth_unit=str(camera_cfg_raw.get("depth_unit", "meters")),
+        look_direction_mode=str(camera_cfg_raw.get("look_direction_mode", "look_at_target")),
+        target_position_xy=(
+            float(debug_character["position"][0]),
+            float(debug_character["position"][1]),
+        ),
+        debug_logging=bool(camera_cfg_raw.get("debug_logging", False)),
+        enable_rgb=bool(camera_cfg_raw.get("enable_rgb", True)),
+        enable_depth=bool(camera_cfg_raw.get("enable_depth", True)),
+        enable_instance_segmentation=bool(camera_cfg_raw.get("enable_instance_segmentation", True)),
+        yaw_jitter_margin=float(camera_cfg_raw.get("yaw_jitter_margin", 0.0)),
+    )
+
+
+def _set_render_mode(simulation_app, mode: str, warmup_updates: int = 4) -> None:
+    import carb.settings
+
+    settings = carb.settings.get_settings()
+    settings.set("/rtx/rendermode", str(mode))
+    for _ in range(int(warmup_updates)):
+        simulation_app.update()
 
 
 def _collect_single_position(
@@ -82,7 +116,17 @@ def _collect_single_position(
     position_index: int,
 ) -> tuple[Path, int]:
     sampling_cfg = cfg.get("sampling", {})
-    camera_cfg_raw = cfg.get("camera", {})
+    base_camera_cfg_raw = cfg.get("camera", {})
+    scoring_camera_cfg_raw = dict(cfg.get("scoring_camera", base_camera_cfg_raw))
+    capture_camera_cfg_raw = dict(cfg.get("capture_camera", base_camera_cfg_raw))
+    scoring_camera_cfg_raw.setdefault("prim_path", "/World/ScoringCamera")
+    scoring_camera_cfg_raw.setdefault("enable_rgb", False)
+    scoring_camera_cfg_raw.setdefault("enable_depth", False)
+    scoring_camera_cfg_raw.setdefault("enable_instance_segmentation", True)
+    capture_camera_cfg_raw.setdefault("prim_path", "/World/CollectorCamera")
+    capture_camera_cfg_raw.setdefault("enable_rgb", True)
+    capture_camera_cfg_raw.setdefault("enable_depth", True)
+    capture_camera_cfg_raw.setdefault("enable_instance_segmentation", True)
     ring_cfg = cfg.get("score_field", {})
     pos_dir = ensure_position_output_dirs(scene_root, position_index)
 
@@ -104,25 +148,10 @@ def _collect_single_position(
     score_min = float(ring_cfg.get("capture_score_min", 0.2))
     score_max = float(ring_cfg.get("capture_score_max", 0.6))
     score_overlay_path = pos_dir / "score_field_overlay.png"
-    camera_cfg = CameraCaptureConfig(
-        prim_path=camera_cfg_raw.get("prim_path", "/World/CollectorCamera"),
-        resolution=tuple(camera_cfg_raw.get("resolution", [600, 400])),
-        camera_height=float(camera_cfg_raw.get("camera_height", 0.4)),
-        visibility_settle_updates=int(camera_cfg_raw.get("visibility_settle_updates", camera_cfg_raw.get("warmup_updates", 8))),
-        focus_distance=float(camera_cfg_raw.get("focus_distance", 400.0)),
-        focal_length=float(camera_cfg_raw.get("focal_length", 15.0)),
-        horizontal_aperture=float(camera_cfg_raw.get("horizontal_aperture", 3.6)),
-        vertical_aperture=float(camera_cfg_raw.get("vertical_aperture", 2.4)),
-        near_clipping_distance=float(camera_cfg_raw.get("near_clipping_distance", 0.01)),
-        depth_unit=str(camera_cfg_raw.get("depth_unit", "meters")),
-        look_direction_mode=str(camera_cfg_raw.get("look_direction_mode", "look_at_target")),
-        target_position_xy=(
-            float(debug_character["position"][0]),
-            float(debug_character["position"][1]),
-        ),
-        debug_logging=bool(camera_cfg_raw.get("debug_logging", False)),
-    )
-    collector_camera = create_collector_camera(camera_cfg)
+    scoring_camera_cfg = _build_camera_config(scoring_camera_cfg_raw, debug_character)
+    capture_camera_cfg = _build_camera_config(capture_camera_cfg_raw, debug_character)
+    scoring_camera = create_collector_camera(scoring_camera_cfg)
+    collector_camera = create_collector_camera(capture_camera_cfg)
     print(f"[Step 3.{position_index:03d}] generating segmentation-based ring score field around person", flush=True)
     import omni.usd
 
@@ -150,9 +179,9 @@ def _collect_single_position(
         return estimate_candidate_visibility_ratios_batch(
             simulation_app=simulation_app,
             timeline=timeline,
-            camera=collector_camera,
+            camera=scoring_camera,
             poses=poses,
-            visibility_settle_updates=camera_cfg.visibility_settle_updates,
+            visibility_settle_updates=scoring_camera_cfg.visibility_settle_updates,
             person_prim_path=str(debug_character["prim_path"]),
             scene_collision_exists=scene_collision_exists,
             geometry_root=geometry_root,
@@ -165,7 +194,7 @@ def _collect_single_position(
             float(debug_character["position"][0]),
             float(debug_character["position"][1]),
         ),
-        camera_height_m=float(camera_cfg_raw.get("camera_height", 0.4)),
+        camera_height_m=float(scoring_camera_cfg_raw.get("camera_height", 0.4)),
         min_radius_m=float(ring_cfg.get("min_radius_m", 0.8)),
         max_radius_m=float(ring_cfg.get("max_radius_m", 3.0)),
         grid_step_m=float(ring_cfg.get("grid_step_m", 0.2)),
@@ -230,13 +259,20 @@ def _collect_single_position(
     print(f"  [Position {position_index:03d}] capture_candidates: {len(capture_candidates)}", flush=True)
     print(f"  [Position {position_index:03d}] score_overlay_path: {score_overlay_path}", flush=True)
 
+    _set_render_mode(
+        simulation_app=simulation_app,
+        mode="PathTracing",
+        warmup_updates=int(capture_camera_cfg_raw.get("warmup_updates", 8)),
+    )
+    print(f"  [Position {position_index:03d}] render_mode: PathTracing", flush=True)
+
     capture_records = capture_candidate_views(
         simulation_app=simulation_app,
         timeline=timeline,
         camera=collector_camera,
         candidates=capture_candidates,
         scene_dir=pos_dir,
-        cfg=camera_cfg,
+        cfg=capture_camera_cfg,
         score_field=score_field,
         person_prim_path=str(debug_character["prim_path"]),
         occupancy_map=occupancy_map,
@@ -267,6 +303,7 @@ def _collect_single_position(
                 "ground_mask_path": _relpath(record.ground_mask_path, pos_dir),
                 "score_map_path": _relpath(record.score_map_path, pos_dir),
                 "valid_mask_path": _relpath(record.valid_mask_path, pos_dir),
+                "yaw_map_path": _relpath(record.yaw_map_path, pos_dir),
                 "reid_score": visibility_ratio,
                 "sampling_score": sampling_score,
                 "visible_person_pixels": int(record.visible_person_pixels),
@@ -280,7 +317,7 @@ def _collect_single_position(
     metadata_path = pos_dir / "metadata.json"
     scores_path = pos_dir / "scores.json"
     metadata_payload = {
-        "img_size": [int(camera_cfg.resolution[1]), int(camera_cfg.resolution[0])],
+        "img_size": [int(capture_camera_cfg.resolution[1]), int(capture_camera_cfg.resolution[0])],
         "score_field_size": int(len(score_field)),
         "observations": observation_items,
     }
@@ -298,6 +335,7 @@ def _collect_single_position(
                     "ground_mask_path": capture_records[0].ground_mask_path,
                     "score_map_path": capture_records[0].score_map_path,
                     "valid_mask_path": capture_records[0].valid_mask_path,
+                    "yaw_map_path": capture_records[0].yaw_map_path,
                     "metadata_path": str(metadata_path),
                     "scores_path": str(scores_path),
                     "visibility_ratio": capture_records[0].visibility_ratio,

@@ -40,12 +40,12 @@ score_field:
   capture_score_max: 0.65
   max_capture_candidates: 16
 
-camera:
-  prim_path: /World/CollectorCamera
-  resolution: [600, 400]
+scoring_camera:
+  prim_path: /World/ScoringCamera
+  resolution: [300, 200]
   camera_height: 0.4
   warmup_updates: 8
-  visibility_settle_updates: 1
+  visibility_settle_updates: 4
   focus_distance: 400.0
   # In this Isaac Sim setup, 1.5 produces the desired 15 mm lens effect.
   focal_length: 1.8
@@ -55,5 +55,28 @@ camera:
   depth_unit: meters
   look_direction_mode: look_at_target
   debug_logging: false
+  enable_rgb: false
+  enable_depth: false
+  enable_instance_segmentation: true
 
-headless: fasle
+capture_camera:
+  prim_path: /World/CollectorCamera
+  resolution: [600, 400]
+  camera_height: 0.4
+  warmup_updates: 8
+  visibility_settle_updates: 1
+  yaw_jitter_margin: 0.1
+  focus_distance: 400.0
+  # In this Isaac Sim setup, 1.5 produces the desired 15 mm lens effect.
+  focal_length: 1.8
+  horizontal_aperture: 3.6
+  vertical_aperture: 2.4
+  near_clipping_distance: 0.01
+  depth_unit: meters
+  look_direction_mode: look_at_target
+  debug_logging: false
+  enable_rgb: true
+  enable_depth: true
+  enable_instance_segmentation: true
+
+headless: false

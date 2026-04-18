@@ -24,6 +24,10 @@ class CameraCaptureConfig:
     look_direction_mode: str
     target_position_xy: tuple[float, float] | None = None
     debug_logging: bool = False
+    enable_rgb: bool = True
+    enable_depth: bool = True
+    enable_instance_segmentation: bool = True
+    yaw_jitter_margin: float = 0.0
 
 
 @dataclass
@@ -37,6 +41,7 @@ class CameraCaptureRecord:
     ground_mask_path: str
     score_map_path: str
     valid_mask_path: str
+    yaw_map_path: str
     visibility_ratio: float
     visible_person_pixels: int
     total_person_pixels: int
@@ -55,9 +60,12 @@ def create_collector_camera(cfg: CameraCaptureConfig):
         orientation=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
     )
     camera.initialize()
-    camera.add_rgb_to_frame()
-    camera.add_distance_to_image_plane_to_frame()
-    camera.add_instance_id_segmentation_to_frame()
+    if cfg.enable_rgb:
+        camera.add_rgb_to_frame()
+    if cfg.enable_depth:
+        camera.add_distance_to_image_plane_to_frame()
+    if cfg.enable_instance_segmentation:
+        camera.add_instance_id_segmentation_to_frame()
     camera.set_focal_length(cfg.focal_length)
     camera.set_horizontal_aperture(cfg.horizontal_aperture)
     camera.set_vertical_aperture(cfg.vertical_aperture)
@@ -117,6 +125,11 @@ def _save_score_map(score_map: np.ndarray, path: Path) -> None:
 def _save_valid_mask(mask: np.ndarray, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, np.asarray(mask, dtype=bool))
+
+
+def _save_yaw_map(yaw_map: np.ndarray, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, np.asarray(yaw_map, dtype=np.float32))
 
 
 def _compute_ground_mask(
@@ -225,12 +238,13 @@ def _compute_score_map(
     horizontal_aperture: float,
     vertical_aperture: float,
     depth_tolerance_m: float = 0.1,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     width, height = int(resolution[0]), int(resolution[1])
     score_map = np.zeros((height, width), dtype=np.float32)
     valid_mask = np.zeros((height, width), dtype=bool)
+    yaw_map = np.zeros((2, height, width), dtype=np.float32)
     if score_field is None:
-        return score_map, valid_mask
+        return score_map, valid_mask, yaw_map
 
     depth_arr = np.asarray(depth_m, dtype=np.float32)
     if depth_arr.shape != (height, width):
@@ -263,10 +277,45 @@ def _compute_score_map(
         if abs(pixel_depth - float(point_depth)) > float(depth_tolerance_m):
             continue
 
-        valid_mask[row, col] = True
-        score_map[row, col] = max(score_map[row, col], float(item.score))
+        yaw_rad = 2.0 * np.arctan2(float(camera_orientation_wxyz[3]), float(camera_orientation_wxyz[0]))
+        delta_yaw = np.arctan2(
+            np.sin(float(yaw_rad) - float(item.yaw_rad)),
+            np.cos(float(yaw_rad) - float(item.yaw_rad)),
+        )
+        if (not valid_mask[row, col]) or (float(item.score) > float(score_map[row, col])):
+            valid_mask[row, col] = True
+            score_map[row, col] = float(item.score)
+            yaw_map[0, row, col] = float(np.cos(delta_yaw))
+            yaw_map[1, row, col] = float(np.sin(delta_yaw))
 
-    return score_map, valid_mask
+    return score_map, valid_mask, yaw_map
+
+
+def _apply_yaw_jitter(
+    camera_position: tuple[float, float, float],
+    base_orientation: tuple[float, float, float, float],
+    cfg: CameraCaptureConfig,
+    rng,
+) -> tuple[float, float, float, float]:
+    margin = float(cfg.yaw_jitter_margin)
+    if margin <= 0.0:
+        return base_orientation
+    if cfg.target_position_xy is None:
+        return base_orientation
+
+    width = int(cfg.resolution[0])
+    fx = width * float(cfg.focal_length) / max(float(cfg.horizontal_aperture), 1e-6)
+    if fx <= 1e-6:
+        return base_orientation
+
+    usable_margin = min(max(margin, 0.0), 0.49)
+    delta_max = float(np.arctan((0.5 - usable_margin) * float(width) / float(fx)))
+    if delta_max <= 0.0:
+        return base_orientation
+
+    base_yaw = 2.0 * np.arctan2(float(base_orientation[3]), float(base_orientation[0]))
+    jitter_rad = float(rng.uniform(-delta_max, delta_max))
+    return _yaw_to_world_quaternion(float(base_yaw + jitter_rad))
 
 
 def _set_prim_visibility(stage, prim_path: str, visible: bool, recursive: bool = False) -> bool:
@@ -470,6 +519,7 @@ def capture_candidate_views(
 ) -> list[CameraCaptureRecord]:
     records: list[CameraCaptureRecord] = []
     import omni.usd
+    import random
 
     stage = omni.usd.get_context().get_stage()
     layers = _detect_visibility_layers(stage)
@@ -486,9 +536,11 @@ def capture_candidate_views(
     if cfg.debug_logging and layers["geometry_root"]:
         print(f"[Capture] Geometry visibility root: {layers['geometry_root']}", flush=True)
     poses: list[tuple[tuple[float, float, float], tuple[float, float, float, float]]] = []
+    jitter_rng = random.Random(0)
     for candidate in candidates:
         camera_orientation = _select_camera_orientation(candidate, cfg)
         camera_position = (candidate.x, candidate.y, cfg.camera_height)
+        camera_orientation = _apply_yaw_jitter(camera_position, camera_orientation, cfg, jitter_rng)
         poses.append((camera_position, camera_orientation))
 
     if layers["scene_collision_exists"]:
@@ -515,6 +567,7 @@ def capture_candidate_views(
         geometry_root=layers["geometry_root"],
     )
 
+    # Batch RGB first, then batch depth, so capture ordering stays deterministic.
     rgb_frames: list[np.ndarray] = []
     if layers["scene_collision_exists"]:
         _set_prim_visibility(stage, "/World/scene_collision", visible=False, recursive=True)
@@ -560,6 +613,7 @@ def capture_candidate_views(
         ground_mask_path = scene_dir / "ground_mask" / f"{file_stem}.png"
         score_map_path = scene_dir / "score_map" / f"{file_stem}.npy"
         valid_mask_path = scene_dir / "valid_mask" / f"{file_stem}.npy"
+        yaw_map_path = scene_dir / "yaw_map" / f"{file_stem}.npy"
         _save_rgb(rgb, rgb_path)
         _save_depth(depth, depth_png_path, depth_npy_path)
         ground_mask = _compute_ground_mask(
@@ -576,7 +630,7 @@ def capture_candidate_views(
             ground_mask,
             ground_mask_path,
         )
-        score_map, valid_mask = _compute_score_map(
+        score_map, valid_mask, yaw_map = _compute_score_map(
             score_field=score_field,
             depth_m=depth,
             ground_mask=ground_mask,
@@ -592,6 +646,7 @@ def capture_candidate_views(
             score_map_path,
         )
         _save_valid_mask(valid_mask, valid_mask_path)
+        _save_yaw_map(yaw_map, yaw_map_path)
 
         record = CameraCaptureRecord(
             index=idx,
@@ -603,6 +658,7 @@ def capture_candidate_views(
             ground_mask_path=str(ground_mask_path),
             score_map_path=str(score_map_path),
             valid_mask_path=str(valid_mask_path),
+            yaw_map_path=str(yaw_map_path),
             visibility_ratio=float(visibility_ratio),
             visible_person_pixels=int(visible_person_pixels),
             total_person_pixels=int(total_person_pixels),

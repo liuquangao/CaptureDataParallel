@@ -122,6 +122,8 @@ def iter_ring_camera_samples(
             continue
         if not bool(occupancy_map.free_mask[row, col]):
             continue
+        if occupancy_map.room_free_mask is not None and not bool(occupancy_map.room_free_mask[row, col]):
+            continue
         if (row, col) in visited_cells:
             continue
         visited_cells.add((row, col))
