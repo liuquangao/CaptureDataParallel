@@ -151,18 +151,20 @@ def place_debug_character(
         min_point_distance_m=float(min_point_distance_m),
     )
     floor_z = 0.0
+    character_yaw_rad = float(rng.uniform(-math.pi, math.pi))
 
     person_prim_path = _add_usd_reference_xform(
         stage=stage,
         usd_path=character_usd_path,
         prim_path=prim_path,
         translation_xyz=(float(char_x), float(char_y), floor_z),
-        yaw_rad=0.0,
+        yaw_rad=character_yaw_rad,
     )
     pose_info = _apply_static_standing_pose(stage, person_prim_path, arm_drop_degrees=arm_drop_degrees)
     return {
         "prim_path": person_prim_path,
         "position": [float(char_x), float(char_y), floor_z],
+        "yaw_rad": character_yaw_rad,
         "character_usd_path": character_usd_path,
         "pose_info": pose_info,
     }
