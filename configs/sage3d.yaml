@@ -7,8 +7,8 @@ dataset:
     # 1. single: collect a specified scene id (or a short explicit list)
     # 2. random: randomly sample random_count scene ids
     # 3. all: collect every .usda scene under stage_root
-    mode: random
-    scene_id: 839874
+    mode: single
+    scene_id: 839875
     # scene_ids: [839874, 840013]
     random_count: 128
     random_seed: 2026

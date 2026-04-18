@@ -13,7 +13,6 @@ class CameraCaptureConfig:
     prim_path: str
     resolution: tuple[int, int]
     camera_height: float
-    warmup_updates: int
     visibility_settle_updates: int
     focus_distance: float
     focal_length: float
@@ -142,7 +141,7 @@ def _compute_ground_mask(
     uu, vv = np.meshgrid(u_coords, v_coords)
 
     forward = depth_arr
-    lateral = (uu - cx) * forward / max(fx, 1e-6)
+    lateral = -(uu - cx) * forward / max(fx, 1e-6)
     vertical = -(vv - cy) * forward / max(fy, 1e-6)
 
     yaw_rad = 2.0 * np.arctan2(float(camera_orientation_wxyz[3]), float(camera_orientation_wxyz[0]))
@@ -155,7 +154,6 @@ def _compute_ground_mask(
     valid_depth = np.isfinite(forward) & (forward > 0.0)
 
     ground_mask = valid_depth & (np.abs(world_z - float(floor_z)) <= float(ground_tolerance_m))
-
     if occupancy_map is not None:
         occupancy_mask = np.zeros((height, width), dtype=bool)
         valid_rows, valid_cols = np.where(ground_mask)
@@ -167,9 +165,9 @@ def _compute_ground_mask(
                 occupancy_mask[row, col] = True
         ground_mask = ground_mask & occupancy_mask
 
-    output = np.zeros((height, width), dtype=np.uint8)
-    output[ground_mask] = 1
-    return output
+    ground_output = np.zeros((height, width), dtype=np.uint8)
+    ground_output[ground_mask] = 1
+    return ground_output
 
 
 def _project_world_point_to_pixel(
@@ -199,7 +197,7 @@ def _project_world_point_to_pixel(
     fy = height * float(focal_length) / max(float(vertical_aperture), 1e-6)
     cx = (width - 1) * 0.5
     cy = (height - 1) * 0.5
-    u = fx * lateral / forward + cx
+    u = cx - fx * lateral / forward
     v = cy - fy * vertical / forward
     if not (0.0 <= u < float(width) and 0.0 <= v < float(height)):
         return None

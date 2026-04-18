@@ -107,7 +107,6 @@ def _collect_single_position(
         prim_path=camera_cfg_raw.get("prim_path", "/World/CollectorCamera"),
         resolution=tuple(camera_cfg_raw.get("resolution", [600, 400])),
         camera_height=float(camera_cfg_raw.get("camera_height", 0.4)),
-        warmup_updates=int(camera_cfg_raw.get("warmup_updates", 8)),
         visibility_settle_updates=int(camera_cfg_raw.get("visibility_settle_updates", camera_cfg_raw.get("warmup_updates", 8))),
         focus_distance=float(camera_cfg_raw.get("focus_distance", 400.0)),
         focal_length=float(camera_cfg_raw.get("focal_length", 15.0)),
@@ -260,12 +259,15 @@ def _collect_single_position(
                 "idx": int(idx),
                 "rgb_path": _relpath(record.rgb_path, pos_dir),
                 "depth_path": _relpath(record.depth_png_path, pos_dir),
+                "depth_npy_path": _relpath(record.depth_npy_path, pos_dir),
                 "ground_mask_path": _relpath(record.ground_mask_path, pos_dir),
                 "score_map_path": _relpath(record.score_map_path, pos_dir),
                 "reid_score": visibility_ratio,
                 "sampling_score": sampling_score,
                 "visible_person_pixels": int(record.visible_person_pixels),
                 "total_person_pixels": int(record.total_person_pixels),
+                "camera_position": [float(v) for v in record.camera_position],
+                "camera_orientation_wxyz": [float(v) for v in record.camera_orientation_wxyz],
             }
         )
         scores_payload[image_name] = visibility_ratio
