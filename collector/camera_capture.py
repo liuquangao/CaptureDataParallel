@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from math import atan2, cos, sin
 from pathlib import Path
@@ -15,6 +16,7 @@ class CameraCaptureConfig:
     resolution: tuple[int, int]
     camera_height: float
     visibility_settle_updates: int
+    visibility_toggle_settle_updates: int
     focus_distance: float
     focal_length: float
     horizontal_aperture: float
@@ -45,6 +47,7 @@ class CameraCaptureRecord:
     visibility_ratio: float
     visible_person_pixels: int
     total_person_pixels: int
+    person_bbox_path: str
     depth_unit: str
 
 
@@ -120,6 +123,28 @@ def _save_ground_mask(mask: np.ndarray, path: Path) -> None:
 def _save_score_map(score_map: np.ndarray, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, np.asarray(score_map, dtype=np.float32))
+
+
+def _save_person_bbox_norm(
+    path: Path,
+    bbox_xyxy: tuple[int, int, int, int] | None,
+    image_width: int,
+    image_height: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if bbox_xyxy is None or image_width <= 0 or image_height <= 0:
+        payload = {"xyxy_norm": None}
+    else:
+        u_min, v_min, u_max, v_max = bbox_xyxy
+        payload = {
+            "xyxy_norm": [
+                float(u_min) / float(image_width),
+                float(v_min) / float(image_height),
+                float(u_max) / float(image_width),
+                float(v_max) / float(image_height),
+            ]
+        }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _save_valid_mask(mask: np.ndarray, path: Path) -> None:
@@ -250,6 +275,8 @@ def _compute_score_map(
     if depth_arr.shape != (height, width):
         raise ValueError(f"Depth shape {depth_arr.shape} does not match score_map shape {(height, width)}")
 
+    cam_yaw = 2.0 * np.arctan2(float(camera_orientation_wxyz[3]), float(camera_orientation_wxyz[0]))
+
     for item in score_field:
         projection = _project_world_point_to_pixel(
             world_xyz=(float(item.x), float(item.y), float(item.z)),
@@ -277,10 +304,9 @@ def _compute_score_map(
         if abs(pixel_depth - float(point_depth)) > float(depth_tolerance_m):
             continue
 
-        yaw_rad = 2.0 * np.arctan2(float(camera_orientation_wxyz[3]), float(camera_orientation_wxyz[0]))
         delta_yaw = np.arctan2(
-            np.sin(float(yaw_rad) - float(item.yaw_rad)),
-            np.cos(float(yaw_rad) - float(item.yaw_rad)),
+            np.sin(float(item.yaw_rad) - float(cam_yaw)),
+            np.cos(float(item.yaw_rad) - float(cam_yaw)),
         )
         if (not valid_mask[row, col]) or (float(item.score) > float(score_map[row, col])):
             valid_mask[row, col] = True
@@ -357,17 +383,34 @@ def _extract_instance_ids_by_path_prefix(segmentation_frame: dict, prim_path_pre
     return matching_ids
 
 
-def _count_instance_pixels(segmentation_frame: dict, prim_path_prefix: str) -> int:
+def _instance_mask(segmentation_frame: dict, prim_path_prefix: str) -> np.ndarray | None:
     if not isinstance(segmentation_frame, dict) or "data" not in segmentation_frame:
-        return 0
+        return None
     data = np.asarray(segmentation_frame["data"])
     if data.ndim == 3 and data.shape[-1] == 1:
         data = data[..., 0]
     label_ids = _extract_instance_ids_by_path_prefix(segmentation_frame, prim_path_prefix)
     if not label_ids:
+        return np.zeros(data.shape, dtype=bool)
+    return np.isin(data.astype(np.int64, copy=False), np.asarray(sorted(label_ids), dtype=np.int64))
+
+
+def _count_instance_pixels(segmentation_frame: dict, prim_path_prefix: str) -> int:
+    mask = _instance_mask(segmentation_frame, prim_path_prefix)
+    if mask is None:
         return 0
-    mask = np.isin(data.astype(np.int64, copy=False), np.asarray(sorted(label_ids), dtype=np.int64))
     return int(mask.sum())
+
+
+def _instance_bbox_xyxy(segmentation_frame: dict, prim_path_prefix: str) -> tuple[int, int, int, int] | None:
+    mask = _instance_mask(segmentation_frame, prim_path_prefix)
+    if mask is None or not mask.any():
+        return None
+    rows = np.flatnonzero(mask.any(axis=1))
+    cols = np.flatnonzero(mask.any(axis=0))
+    v_min, v_max = int(rows[0]), int(rows[-1])
+    u_min, u_max = int(cols[0]), int(cols[-1])
+    return (u_min, v_min, u_max, v_max)
 
 
 def _set_camera_pose(camera, camera_position, camera_orientation) -> None:
@@ -401,6 +444,7 @@ def estimate_candidate_visibility_ratios_batch(
     camera,
     poses: list[tuple[tuple[float, float, float], tuple[float, float, float, float]]],
     visibility_settle_updates: int,
+    visibility_toggle_settle_updates: int,
     person_prim_path: str,
     scene_collision_exists: bool,
     geometry_root: str | None,
@@ -413,6 +457,7 @@ def estimate_candidate_visibility_ratios_batch(
         _set_prim_visibility(stage, "/World/scene_collision", visible=False, recursive=True)
     elif geometry_root:
         _set_prim_visibility(stage, geometry_root, visible=False, recursive=True)
+    _render_warmup(simulation_app, timeline, visibility_toggle_settle_updates)
     total_person_pixels_list = _collect_instance_pixel_counts_for_poses(
         simulation_app=simulation_app,
         timeline=timeline,
@@ -426,6 +471,7 @@ def estimate_candidate_visibility_ratios_batch(
         _set_prim_visibility(stage, "/World/scene_collision", visible=True, recursive=True)
     elif geometry_root:
         _set_prim_visibility(stage, geometry_root, visible=True, recursive=True)
+    _render_warmup(simulation_app, timeline, visibility_toggle_settle_updates)
     visible_person_pixels_list = _collect_instance_pixel_counts_for_poses(
         simulation_app=simulation_app,
         timeline=timeline,
@@ -439,7 +485,7 @@ def estimate_candidate_visibility_ratios_batch(
         _set_prim_visibility(stage, "/World/scene_collision", visible=False, recursive=True)
     elif geometry_root:
         _set_prim_visibility(stage, geometry_root, visible=False, recursive=True)
-    _render_warmup(simulation_app, timeline, visibility_settle_updates)
+    _render_warmup(simulation_app, timeline, visibility_toggle_settle_updates)
 
     results: list[tuple[float, int, int]] = []
     for visible_person_pixels, total_person_pixels in zip(visible_person_pixels_list, total_person_pixels_list):
@@ -455,6 +501,7 @@ def estimate_candidate_visibility_ratio(
     camera_position: tuple[float, float, float],
     camera_orientation: tuple[float, float, float, float],
     visibility_settle_updates: int,
+    visibility_toggle_settle_updates: int,
     person_prim_path: str,
     scene_collision_exists: bool,
     geometry_root: str | None,
@@ -465,6 +512,7 @@ def estimate_candidate_visibility_ratio(
         camera=camera,
         poses=[(camera_position, camera_orientation)],
         visibility_settle_updates=visibility_settle_updates,
+        visibility_toggle_settle_updates=visibility_toggle_settle_updates,
         person_prim_path=person_prim_path,
         scene_collision_exists=scene_collision_exists,
         geometry_root=geometry_root,
@@ -562,6 +610,7 @@ def capture_candidate_views(
         camera=camera,
         poses=poses,
         visibility_settle_updates=cfg.visibility_settle_updates,
+        visibility_toggle_settle_updates=cfg.visibility_toggle_settle_updates,
         person_prim_path=person_path,
         scene_collision_exists=bool(layers["scene_collision_exists"]),
         geometry_root=layers["geometry_root"],
@@ -573,7 +622,7 @@ def capture_candidate_views(
         _set_prim_visibility(stage, "/World/scene_collision", visible=False, recursive=True)
     elif layers["geometry_root"]:
         _set_prim_visibility(stage, layers["geometry_root"], visible=False, recursive=True)
-    _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
+    _render_warmup(simulation_app, timeline, cfg.visibility_toggle_settle_updates)
     for camera_position, camera_orientation in poses:
         _set_camera_pose(camera, camera_position, camera_orientation)
         _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
@@ -583,11 +632,12 @@ def capture_candidate_views(
         rgb_frames.append(np.asarray(rgb))
 
     depth_frames: list[np.ndarray] = []
+    person_bboxes: list[tuple[int, int, int, int] | None] = []
     if layers["scene_collision_exists"]:
         _set_prim_visibility(stage, "/World/scene_collision", visible=True, recursive=True)
     elif layers["geometry_root"]:
         _set_prim_visibility(stage, layers["geometry_root"], visible=True, recursive=True)
-    _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
+    _render_warmup(simulation_app, timeline, cfg.visibility_toggle_settle_updates)
     for camera_position, camera_orientation in poses:
         _set_camera_pose(camera, camera_position, camera_orientation)
         _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
@@ -595,15 +645,17 @@ def capture_candidate_views(
         if depth is None:
             raise RuntimeError("Depth capture returned None during batch capture")
         depth_frames.append(np.asarray(depth))
+        segmentation_frame = camera.get_current_frame().get("instance_id_segmentation")
+        person_bboxes.append(_instance_bbox_xyxy(segmentation_frame, person_path))
 
     if layers["scene_collision_exists"]:
         _set_prim_visibility(stage, "/World/scene_collision", visible=False, recursive=True)
     elif layers["geometry_root"]:
         _set_prim_visibility(stage, layers["geometry_root"], visible=False, recursive=True)
-    _render_warmup(simulation_app, timeline, cfg.visibility_settle_updates)
+    _render_warmup(simulation_app, timeline, cfg.visibility_toggle_settle_updates)
 
-    for idx, (candidate, pose, visibility_result, rgb, depth) in enumerate(
-        zip(candidates, poses, visibility_results, rgb_frames, depth_frames)
+    for idx, (candidate, pose, visibility_result, rgb, depth, person_bbox) in enumerate(
+        zip(candidates, poses, visibility_results, rgb_frames, depth_frames, person_bboxes)
     ):
         camera_position, camera_orientation = pose
         visibility_ratio, visible_person_pixels, total_person_pixels = visibility_result
@@ -616,6 +668,7 @@ def capture_candidate_views(
         score_map_path = scene_dir / "score_map" / f"{file_stem}.npy"
         valid_mask_path = scene_dir / "valid_mask" / f"{file_stem}.npy"
         yaw_map_path = scene_dir / "yaw_map" / f"{file_stem}.npy"
+        person_bbox_path = scene_dir / "person_bbox" / f"{file_stem}.json"
         _save_rgb(rgb, rgb_path)
         _save_depth(depth, depth_png_path, depth_npy_path)
         ground_mask = _compute_ground_mask(
@@ -649,6 +702,12 @@ def capture_candidate_views(
         )
         _save_valid_mask(valid_mask, valid_mask_path)
         _save_yaw_map(yaw_map, yaw_map_path)
+        _save_person_bbox_norm(
+            person_bbox_path,
+            person_bbox,
+            image_width=int(cfg.resolution[0]),
+            image_height=int(cfg.resolution[1]),
+        )
 
         record = CameraCaptureRecord(
             index=idx,
@@ -664,6 +723,7 @@ def capture_candidate_views(
             visibility_ratio=float(visibility_ratio),
             visible_person_pixels=int(visible_person_pixels),
             total_person_pixels=int(total_person_pixels),
+            person_bbox_path=str(person_bbox_path),
             depth_unit=cfg.depth_unit,
         )
         records.append(record)

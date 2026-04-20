@@ -48,6 +48,25 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def _check_scene_filter(scene_cfg: dict, cfg: dict) -> tuple[bool, str | None]:
+    """Pre-load just the occupancy map (cheap) and decide whether to skip."""
+    scene_filter_cfg = cfg.get("scene_filter", {}) or {}
+    max_free_ratio = scene_filter_cfg.get("max_free_ratio")
+    if max_free_ratio is None:
+        return False, None
+    occupancy_map = load_interiorgs_occupancy_map(scene_cfg)
+    total_cells = int(occupancy_map.width) * int(occupancy_map.height)
+    if total_cells <= 0:
+        return False, None
+    free_ratio = float(int(occupancy_map.free_mask.sum())) / float(total_cells)
+    if free_ratio > float(max_free_ratio):
+        return True, (
+            f"occupancy free_ratio={free_ratio:.3f} > max_free_ratio={float(max_free_ratio):.3f} "
+            f"(likely unclosed / unbounded scene)"
+        )
+    return False, None
+
+
 def ensure_output_dirs(output_root: str, scene_name: str) -> Path:
     scene_dir = Path(output_root) / scene_name
     legacy_debug_dir = scene_dir / "debug"
@@ -62,7 +81,7 @@ def ensure_output_dirs(output_root: str, scene_name: str) -> Path:
 
 def ensure_position_output_dirs(scene_root: Path, position_index: int) -> Path:
     pos_dir = scene_root / f"pos_{position_index:03d}"
-    for rel in ("rgb", "depth", "ground_mask", "score_map", "valid_mask", "yaw_map"):
+    for rel in ("rgb", "depth", "ground_mask", "score_map", "valid_mask", "yaw_map", "person_bbox"):
         (pos_dir / rel).mkdir(parents=True, exist_ok=True)
     return pos_dir
 
@@ -71,12 +90,22 @@ def _relpath(path: str | Path, root: Path) -> str:
     return str(Path(path).resolve().relative_to(root.resolve()))
 
 
-def _build_camera_config(camera_cfg_raw: dict, debug_character: dict) -> CameraCaptureConfig:
+def _build_camera_config(
+    camera_cfg_raw: dict,
+    debug_character: dict | None = None,
+) -> CameraCaptureConfig:
+    target_position_xy = None
+    if debug_character is not None:
+        target_position_xy = (
+            float(debug_character["position"][0]),
+            float(debug_character["position"][1]),
+        )
     return CameraCaptureConfig(
         prim_path=camera_cfg_raw.get("prim_path", "/World/CollectorCamera"),
         resolution=tuple(camera_cfg_raw.get("resolution", [600, 400])),
         camera_height=float(camera_cfg_raw.get("camera_height", 0.4)),
-        visibility_settle_updates=int(camera_cfg_raw.get("visibility_settle_updates", camera_cfg_raw.get("warmup_updates", 8))),
+        visibility_settle_updates=int(camera_cfg_raw.get("visibility_settle_updates", 4)),
+        visibility_toggle_settle_updates=int(camera_cfg_raw.get("visibility_toggle_settle_updates", 8)),
         focus_distance=float(camera_cfg_raw.get("focus_distance", 400.0)),
         focal_length=float(camera_cfg_raw.get("focal_length", 15.0)),
         horizontal_aperture=float(camera_cfg_raw.get("horizontal_aperture", 3.6)),
@@ -84,16 +113,28 @@ def _build_camera_config(camera_cfg_raw: dict, debug_character: dict) -> CameraC
         near_clipping_distance=float(camera_cfg_raw.get("near_clipping_distance", 0.01)),
         depth_unit=str(camera_cfg_raw.get("depth_unit", "meters")),
         look_direction_mode=str(camera_cfg_raw.get("look_direction_mode", "look_at_target")),
-        target_position_xy=(
-            float(debug_character["position"][0]),
-            float(debug_character["position"][1]),
-        ),
+        target_position_xy=target_position_xy,
         debug_logging=bool(camera_cfg_raw.get("debug_logging", False)),
         enable_rgb=bool(camera_cfg_raw.get("enable_rgb", True)),
         enable_depth=bool(camera_cfg_raw.get("enable_depth", True)),
         enable_instance_segmentation=bool(camera_cfg_raw.get("enable_instance_segmentation", True)),
         yaw_jitter_margin=float(camera_cfg_raw.get("yaw_jitter_margin", 0.0)),
     )
+
+
+def _resolve_camera_cfg_raws(cfg: dict) -> tuple[dict, dict]:
+    base_camera_cfg_raw = cfg.get("camera", {})
+    scoring_camera_cfg_raw = dict(cfg.get("scoring_camera", base_camera_cfg_raw))
+    capture_camera_cfg_raw = dict(cfg.get("capture_camera", base_camera_cfg_raw))
+    scoring_camera_cfg_raw.setdefault("prim_path", "/World/ScoringCamera")
+    scoring_camera_cfg_raw.setdefault("enable_rgb", False)
+    scoring_camera_cfg_raw.setdefault("enable_depth", False)
+    scoring_camera_cfg_raw.setdefault("enable_instance_segmentation", True)
+    capture_camera_cfg_raw.setdefault("prim_path", "/World/CollectorCamera")
+    capture_camera_cfg_raw.setdefault("enable_rgb", True)
+    capture_camera_cfg_raw.setdefault("enable_depth", True)
+    capture_camera_cfg_raw.setdefault("enable_instance_segmentation", True)
+    return scoring_camera_cfg_raw, capture_camera_cfg_raw
 
 
 def _set_render_mode(simulation_app, mode: str, warmup_updates: int = 4) -> None:
@@ -115,26 +156,20 @@ def _collect_single_position(
     scene_root: Path,
     position_index: int,
     existing_character_positions_xy: list[tuple[float, float]],
+    scoring_camera,
+    collector_camera,
+    scoring_camera_cfg_raw: dict,
+    capture_camera_cfg_raw: dict,
+    attempt_index: int = 0,
 ) -> tuple[Path, int]:
     sampling_cfg = cfg.get("sampling", {})
-    base_camera_cfg_raw = cfg.get("camera", {})
-    scoring_camera_cfg_raw = dict(cfg.get("scoring_camera", base_camera_cfg_raw))
-    capture_camera_cfg_raw = dict(cfg.get("capture_camera", base_camera_cfg_raw))
-    scoring_camera_cfg_raw.setdefault("prim_path", "/World/ScoringCamera")
-    scoring_camera_cfg_raw.setdefault("enable_rgb", False)
-    scoring_camera_cfg_raw.setdefault("enable_depth", False)
-    scoring_camera_cfg_raw.setdefault("enable_instance_segmentation", True)
-    capture_camera_cfg_raw.setdefault("prim_path", "/World/CollectorCamera")
-    capture_camera_cfg_raw.setdefault("enable_rgb", True)
-    capture_camera_cfg_raw.setdefault("enable_depth", True)
-    capture_camera_cfg_raw.setdefault("enable_instance_segmentation", True)
     ring_cfg = cfg.get("score_field", {})
     pos_dir = ensure_position_output_dirs(scene_root, position_index)
 
     debug_character = place_debug_character(
         stage,
         occupancy_map,
-        seed=int(sampling_cfg.get("seed", 0)) + 1000 + int(position_index),
+        seed=int(sampling_cfg.get("seed", 0)) + 1000 + int(position_index) + int(attempt_index) * 100003,
         character_usd_path=str(
             scene_cfg.get(
                 "character_usd_path",
@@ -157,8 +192,6 @@ def _collect_single_position(
     score_overlay_path = pos_dir / "score_field_overlay.png"
     scoring_camera_cfg = _build_camera_config(scoring_camera_cfg_raw, debug_character)
     capture_camera_cfg = _build_camera_config(capture_camera_cfg_raw, debug_character)
-    scoring_camera = create_collector_camera(scoring_camera_cfg)
-    collector_camera = create_collector_camera(capture_camera_cfg)
     print(f"[Step 3.{position_index:03d}] generating segmentation-based ring score field around person", flush=True)
     import omni.usd
 
@@ -189,6 +222,7 @@ def _collect_single_position(
             camera=scoring_camera,
             poses=poses,
             visibility_settle_updates=scoring_camera_cfg.visibility_settle_updates,
+            visibility_toggle_settle_updates=scoring_camera_cfg.visibility_toggle_settle_updates,
             person_prim_path=str(debug_character["prim_path"]),
             scene_collision_exists=scene_collision_exists,
             geometry_root=geometry_root,
@@ -286,6 +320,12 @@ def _collect_single_position(
         occupancy_map=occupancy_map,
     )
 
+    _set_render_mode(
+        simulation_app=simulation_app,
+        mode="RaytracedLighting",
+        warmup_updates=int(scoring_camera_cfg_raw.get("warmup_updates", 4)),
+    )
+
     observation_items = []
     scores_payload = {}
     for idx, (candidate, record) in enumerate(zip(capture_candidates, capture_records)):
@@ -316,6 +356,7 @@ def _collect_single_position(
                 "sampling_score": sampling_score,
                 "visible_person_pixels": int(record.visible_person_pixels),
                 "total_person_pixels": int(record.total_person_pixels),
+                "person_bbox_path": _relpath(record.person_bbox_path, pos_dir),
                 "camera_position": [float(v) for v in record.camera_position],
                 "camera_orientation_wxyz": [float(v) for v in record.camera_orientation_wxyz],
             }
@@ -511,26 +552,81 @@ def collect_scene(simulation_app, cfg: dict, scene_cfg: dict, keep_scene_open: b
     num_positions = int(cfg.get("num_positions", 1))
     if num_positions <= 0:
         raise ValueError("num_positions must be > 0")
-    print(f"[Step 3] collecting {num_positions} person positions in scene", flush=True)
-    total_captures = 0
-    existing_character_positions_xy: list[tuple[float, float]] = []
-    for position_index in range(num_positions):
-        print(f"[Position {position_index:03d}] start", flush=True)
-        pos_dir, capture_count = _collect_single_position(
-            simulation_app=simulation_app,
-            timeline=timeline,
-            stage=stage,
-            occupancy_map=occupancy_map,
-            cfg=cfg,
-            scene_cfg=scene_cfg,
-            scene_root=scene_root,
-            position_index=position_index,
-            existing_character_positions_xy=existing_character_positions_xy,
-        )
-        total_captures += capture_count
-        print(f"[Position {position_index:03d}] saved to {pos_dir} ({capture_count} views)", flush=True)
 
-    print(f"[Step 4] scene capture complete: {num_positions} positions, {total_captures} views total", flush=True)
+    scoring_camera_cfg_raw, capture_camera_cfg_raw = _resolve_camera_cfg_raws(cfg)
+    scoring_camera = create_collector_camera(_build_camera_config(scoring_camera_cfg_raw))
+    collector_camera = create_collector_camera(_build_camera_config(capture_camera_cfg_raw))
+    print("[Step 3] cameras created once for scene", flush=True)
+
+    print(f"[Step 3] collecting {num_positions} person positions in scene", flush=True)
+    max_attempts_per_position = int(cfg.get("sampling", {}).get("max_attempts_per_position", 10))
+    total_captures = 0
+    skipped_positions = 0
+    existing_character_positions_xy: list[tuple[float, float]] = []
+    try:
+        for position_index in range(num_positions):
+            print(f"[Position {position_index:03d}] start", flush=True)
+            succeeded = False
+            for attempt in range(max_attempts_per_position):
+                try:
+                    pos_dir, capture_count = _collect_single_position(
+                        simulation_app=simulation_app,
+                        timeline=timeline,
+                        stage=stage,
+                        occupancy_map=occupancy_map,
+                        cfg=cfg,
+                        scene_cfg=scene_cfg,
+                        scene_root=scene_root,
+                        position_index=position_index,
+                        existing_character_positions_xy=existing_character_positions_xy,
+                        scoring_camera=scoring_camera,
+                        collector_camera=collector_camera,
+                        scoring_camera_cfg_raw=scoring_camera_cfg_raw,
+                        capture_camera_cfg_raw=capture_camera_cfg_raw,
+                        attempt_index=attempt,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[Position {position_index:03d}] attempt {attempt + 1}/{max_attempts_per_position} "
+                        f"failed: {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    continue
+                total_captures += capture_count
+                print(
+                    f"[Position {position_index:03d}] saved to {pos_dir} "
+                    f"({capture_count} views) on attempt {attempt + 1}",
+                    flush=True,
+                )
+                succeeded = True
+                break
+            if not succeeded:
+                skipped_positions += 1
+                print(
+                    f"[Position {position_index:03d}] skipped after "
+                    f"{max_attempts_per_position} attempts",
+                    flush=True,
+                )
+    finally:
+        del scoring_camera
+        del collector_camera
+        for cam_path in (
+            str(scoring_camera_cfg_raw.get("prim_path", "/World/ScoringCamera")),
+            str(capture_camera_cfg_raw.get("prim_path", "/World/CollectorCamera")),
+        ):
+            prim = stage.GetPrimAtPath(cam_path)
+            if prim and prim.IsValid():
+                stage.RemovePrim(cam_path)
+        for _ in range(2):
+            simulation_app.update()
+
+    successful_positions = num_positions - skipped_positions
+    print(
+        f"[Step 4] scene capture complete: "
+        f"{successful_positions}/{num_positions} positions, "
+        f"{skipped_positions} skipped, {total_captures} views total",
+        flush=True,
+    )
 
     if keep_scene_open:
         timeline.play()
@@ -558,10 +654,37 @@ def main() -> None:
             )
 
         multiple_scenes = len(scene_cfgs) > 1
+        failed_scenes: list[tuple[str, str]] = []
+        filtered_scenes: list[tuple[str, str]] = []
+        output_root = cfg.get("output", {}).get("root_dir", "./outputs")
         for index, scene_cfg in enumerate(scene_cfgs, start=1):
-            print(f"\n=== Scene {index}/{len(scene_cfgs)}: {scene_cfg.get('name', 'unnamed_scene')} ===", flush=True)
+            scene_name = str(scene_cfg.get("name", "unnamed_scene"))
+            print(f"\n=== Scene {index}/{len(scene_cfgs)}: {scene_name} ===", flush=True)
+
+            if (Path(output_root) / scene_name).exists():
+                print(f"[Scene {scene_name}] skipped: output already exists at {Path(output_root) / scene_name}", flush=True)
+                filtered_scenes.append((scene_name, "output directory already exists"))
+                continue
+
+            try:
+                should_skip, reason = _check_scene_filter(scene_cfg, cfg)
+            except Exception as exc:
+                should_skip, reason = False, None
+                print(f"[Scene {scene_name}] scene_filter check failed, keeping scene: {type(exc).__name__}: {exc}", flush=True)
+            if should_skip:
+                print(f"[Scene {scene_name}] skipped by scene_filter: {reason}", flush=True)
+                filtered_scenes.append((scene_name, reason or ""))
+                continue
+
             keep_scene_open = bool(scene_cfg.get("keep_scene_open_after_capture", True)) and not multiple_scenes
-            collect_scene(simulation_app, cfg, scene_cfg, keep_scene_open=keep_scene_open)
+            try:
+                collect_scene(simulation_app, cfg, scene_cfg, keep_scene_open=keep_scene_open)
+            except Exception as exc:
+                import traceback
+
+                failed_scenes.append((scene_name, f"{type(exc).__name__}: {exc}"))
+                print(f"[Scene {scene_name}] failed: {type(exc).__name__}: {exc}", flush=True)
+                traceback.print_exc()
             if multiple_scenes:
                 try:
                     import omni.usd
@@ -572,6 +695,15 @@ def main() -> None:
                 except Exception:
                     pass
                 gc.collect()
+
+        if filtered_scenes:
+            print(f"\n[Summary] {len(filtered_scenes)} scene(s) skipped by scene_filter:", flush=True)
+            for scene_name, reason in filtered_scenes:
+                print(f"  - {scene_name}: {reason}", flush=True)
+        if failed_scenes:
+            print(f"\n[Summary] {len(failed_scenes)} scene(s) failed:", flush=True)
+            for scene_name, err in failed_scenes:
+                print(f"  - {scene_name}: {err}", flush=True)
     except Exception:
         import traceback
         traceback.print_exc()

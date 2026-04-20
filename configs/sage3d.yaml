@@ -20,15 +20,21 @@ dataset:
     mode: random
 
     # Used when mode == single
-    scene_id: 839875
+    scene_id: 840013
     # scene_ids: [839874, 840013]
 
     # Used when mode == random
-    random_count: 512
+    random_count: 640
     random_seed: 2026
 
 # Number of person placements collected per scene
 num_positions: 4
+
+scene_filter:
+  # Skip scenes whose occupancy map is mostly free space (usually means the
+  # map is not closed / unbounded, e.g. 0432_839899). Ratio = free_cells /
+  # total_grid_cells. Typical closed indoor scenes sit around 0.3-0.6.
+  max_free_ratio: 0.75
 
 sampling:
   # Reproducibility seed for per-scene position / candidate sampling
@@ -40,11 +46,15 @@ sampling:
   # Character spawn point must keep this clearance from obstacles
   character_min_obstacle_distance_m: 0.2
 
+  # If placement/scoring fails for a given pos_{xxx}, retry with a fresh seed
+  # up to this many times before giving up on that position.
+  max_attempts_per_position: 2
+
 score_field:
   # Ring around the person used for score-field candidate generation
   min_radius_m: 1.2
   max_radius_m: 4.5
-  grid_step_m: 0.1
+  grid_step_m: 0.15
 
   # Camera candidates in the score field must keep this clearance from obstacles
   camera_min_obstacle_distance_m: 0.2
@@ -90,10 +100,13 @@ output:
 
 scoring_camera:
   prim_path: /World/ScoringCamera
-  resolution: [300, 200]
+  resolution: [150, 100]
   camera_height: 0.4
   warmup_updates: 8
+  # Per-pose warmup (frames) after set_world_pose, before reading annotator
   visibility_settle_updates: 4
+  # Extra warmup (frames) after toggling scene_collision / geometry_root visibility
+  visibility_toggle_settle_updates: 8
 
   focus_distance: 400.0
   # In this Isaac Sim setup, 1.8 produces the desired 15 mm lens effect.
@@ -115,7 +128,10 @@ capture_camera:
   resolution: [600, 400]
   camera_height: 0.4
   warmup_updates: 8
-  visibility_settle_updates: 1
+  # Per-pose warmup (frames) after set_world_pose, before reading annotator
+  visibility_settle_updates: 4
+  # Extra warmup (frames) after toggling scene_collision / geometry_root visibility
+  visibility_toggle_settle_updates: 8
 
   # Random left/right yaw offset so the person is not always centered
   yaw_jitter_margin: 0.1
@@ -140,4 +156,4 @@ capture_camera:
 # App Launch
 # -----------------------------------------------------------------------------
 
-headless: false
+headless: true
