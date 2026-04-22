@@ -4,7 +4,6 @@
 # utils/ 引入,不再依赖 collector/ 下的模块。
 #
 # 输出 <backend_params.output_dir>/<scene_id>/pos_{idx:03d}/:
-#   score_field.json                (Stage 1)
 #   score_field_overlay.png         (Stage 1, Stage 3 叠加 selected 后覆写)
 #   rgb/{idx:03d}.png               (Stage 3)
 #   depth/{idx:03d}.png             (uint16 mm)
@@ -111,11 +110,11 @@ def main() -> None:
 
     def _set_low_quality():
         carb_settings.set("/rtx/rendermode", "RayTracedLighting")
-        carb_settings.set("rtx/post/dlss/execMode", 0)
+        # carb_settings.set("rtx/post/dlss/execMode", 0)
 
     def _set_high_quality():
         carb_settings.set("/rtx/rendermode", "PathTracing")
-        carb_settings.set("rtx/post/dlss/execMode", 2)
+        # carb_settings.set("rtx/post/dlss/execMode", 2)
 
     rep.set_global_seed(int(config.get("sampling", {}).get("seed", 42)))
     rep.orchestrator.set_capture_on_play(False)
@@ -129,8 +128,8 @@ def main() -> None:
     camera_cfg = config["camera"]
     resolution = tuple(camera_cfg["resolution"])
     focal_length = float(camera_cfg["focal_length"])
-    vertical_aperture = float(camera_cfg["vertical_aperture"])
     horizontal_aperture = float(_REP_DEFAULT_HORIZONTAL_APERTURE)
+    vertical_aperture = float(_REP_DEFAULT_HORIZONTAL_APERTURE)
     camera_z = float(camera_cfg.get("camera_height", 0.4))
 
     num_cameras = int(config["num_cameras"])
@@ -376,28 +375,7 @@ def main() -> None:
                 score_field.append(sf)
                 poses_payload[i] = {"idx": int(i), **asdict(sf)}
 
-            # --- 3.5 写 score_field.json ---
-            score_field_payload = {
-                "person_position": [float(v) for v in person_xyz],
-                "num_poses": len(ring_samples),
-                "num_certain": len(certain_indices),
-                "num_uncertain": len(uncertain_indices),
-                "pass1_elapsed_sec": float(pass1_elapsed),
-                "pass2_elapsed_sec": float(pass2_elapsed),
-                "occupancy_full_visibility_width_m": body_width_m,
-                "ring_params": {
-                    "min_radius_m": float(score_field_cfg["min_radius_m"]),
-                    "max_radius_m": float(score_field_cfg["max_radius_m"]),
-                    "grid_step_m": float(score_field_cfg["grid_step_m"]),
-                    "camera_min_obstacle_distance_m": float(score_field_cfg["camera_min_obstacle_distance_m"]),
-                },
-                "poses": poses_payload,
-            }
-            score_field_path = pos_dir / "score_field.json"
-            score_field_path.write_text(json.dumps(score_field_payload, indent=2), encoding="utf-8")
-            print(f"[SDG] {pos_tag} wrote {score_field_path}")
-
-            # --- 3.6 Stage 3: 挑 N 个 candidate + capture ---
+            # --- 3.5 Stage 3: 挑 N 个 candidate + capture ---
             selected = select_capture_candidates(
                 score_field=score_field,
                 score_min=capture_score_min,

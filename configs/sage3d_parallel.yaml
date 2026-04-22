@@ -3,7 +3,10 @@
 # ---------------------------------------------------------------------------
 launch_config:
   renderer: RealTimePathTracing
-  headless: false
+  headless: true
+  disable_viewport_updates: true
+  anti_aliasing: 1
+
 
 
 rt_subframes: 4   # orchestrator.step 的 rt_subframes
@@ -86,13 +89,10 @@ scene:
 # Camera (单一相机池,同时用于 score_field 打分 + 最终 RGB/Depth 捕获)
 # ---------------------------------------------------------------------------
 camera:
-  resolution: [640, 640]
+  resolution: [640, 480]
   camera_height: 0.4
   focus_distance: 400.0
   focal_length: 12
-  # rep.functional.create.camera 默认 horizontal_aperture=20.955;
-  # 640×640 方形像素要求 vertical_aperture 与之一致。
-  vertical_aperture: 20.955
   near_clipping_distance: 0.01
 backend_params:
   output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_parallel

@@ -140,7 +140,7 @@ The final score is:
 visible_person_pixels / total_person_pixels
 ```
 
-All candidate poses and scores are written to `score_field.json`, and an overlay image is written to `score_field_overlay.png`.
+All candidate poses are scored in memory, and the selected result is visualized in `score_field_overlay.png`.
 
 ### 4. Final View Selection and Capture
 
@@ -161,7 +161,6 @@ Outputs are written under:
 
 Each `pos_xxx` directory contains:
 
-- `score_field.json`
 - `score_field_overlay.png`
 - `rgb/{idx:03d}.png`
 - `depth/{idx:03d}.png`
@@ -175,9 +174,6 @@ Each `pos_xxx` directory contains:
 - `scores.json`
 
 ### File Meanings
-
-- `score_field.json`
-  All sampled camera candidates around the person, including score and scoring mode.
 
 - `score_field_overlay.png`
   Occupancy-map visualization with the person position, sampled candidates, and selected final views.
