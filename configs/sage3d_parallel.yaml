@@ -92,7 +92,7 @@ camera:
   resolution: [640, 480]
   camera_height: 0.4
   focus_distance: 400.0
-  focal_length: 12
+  focal_length: 8
   near_clipping_distance: 0.01
 backend_params:
   output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_parallel
