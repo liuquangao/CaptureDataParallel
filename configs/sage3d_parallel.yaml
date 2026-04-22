@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# App / Render
+# ---------------------------------------------------------------------------
+launch_config:
+  renderer: RealTimePathTracing
+  headless: false
+
+
+rt_subframes: 4   # orchestrator.step 的 rt_subframes
+num_cameras: 16   # 每批并行的相机数
+
+clear_previous_semantics: true
+close_app_after_run: true
+
+# ---------------------------------------------------------------------------
+# Character
+# ---------------------------------------------------------------------------
+person:
+  url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
+
+# ---------------------------------------------------------------------------
+# Dataset (阶段 4 多 scene 循环用)
+# ---------------------------------------------------------------------------
+dataset:
+  stage_root: /home/leo/FusionLab/DataSets/spatialverse/SAGE-3D_InteriorGS_usda
+  interiorgs_root: /home/leo/FusionLab/DataSets/spatialverse/InteriorGS
+  selection:
+    # Modes:
+    # 1. single: collect one specified scene_id (or a short explicit list)
+    # 2. random: randomly sample random_count scene ids
+    # 3. all: collect every supported .usda scene
+    mode: random
+    random_count: 640
+    random_seed: 2026
+
+# Number of person placements collected per scene
+num_positions: 4
+
+scene_filter:
+  # Skip scenes whose occupancy map is mostly free space (usually means the
+  # map is not closed / unbounded, e.g. 0432_839899). Ratio = free_cells /
+  # total_grid_cells. Typical closed indoor scenes sit around 0.3-0.6.
+  max_free_ratio: 0.75
+
+sampling:
+  # Reproducibility seed for per-scene position / candidate sampling
+  seed: 2026
+
+  # Different pos_{xxx} in the same scene must be at least this far apart
+  min_position_distance_m: 3.0
+
+  # Character spawn point must keep this clearance from obstacles
+  character_min_obstacle_distance_m: 0.2
+
+  # If placement/scoring fails for a given pos_{xxx}, retry with a fresh seed
+  # up to this many times before giving up on that position.
+  max_attempts_per_position: 2
+
+score_field:
+  min_radius_m: 1.2
+  max_radius_m: 4.5
+  grid_step_m: 0.10
+  # Camera candidates in the score field must keep this clearance from obstacles
+  camera_min_obstacle_distance_m: 0.2
+  # Occupancy-based shortcut: if the full body width is cleanly visible,
+  # directly mark score=1.0 without segmentation scoring
+  occupancy_full_visibility_width_m: 0.25
+  # Final render views are sampled only from this score range
+  capture_score_min: 0.20
+  capture_score_max: 0.65
+  # Number of final rendered observations per pos_{xxx}
+  max_capture_candidates: 16
+
+
+# ---------------------------------------------------------------------------
+# Scene (占用图坐标变换 + character 相关开关)
+# ---------------------------------------------------------------------------
+scene:
+  # Occupancy-map to Isaac-world transform
+  occupancy_flip_x: true
+  occupancy_flip_y: true
+  occupancy_negate_xy: true
+  warmup_updates: 10
+
+# ---------------------------------------------------------------------------
+# Camera (单一相机池,同时用于 score_field 打分 + 最终 RGB/Depth 捕获)
+# ---------------------------------------------------------------------------
+camera:
+  resolution: [640, 640]
+  camera_height: 0.4
+  focus_distance: 400.0
+  focal_length: 12
+  # rep.functional.create.camera 默认 horizontal_aperture=20.955;
+  # 640×640 方形像素要求 vertical_aperture 与之一致。
+  vertical_aperture: 20.955
+  near_clipping_distance: 0.01
+backend_params:
+  output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_parallel

@@ -19,7 +19,7 @@ env/
 .DS_Store
 
 # Generated outputs
-outputs/
+outputs_parallel/
 
 # Local logs / temp files
 *.log

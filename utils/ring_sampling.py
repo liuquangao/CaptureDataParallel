@@ -1,12 +1,17 @@
+"""围绕人物的环形相机候选点采样 + 基于占用图的可见性短路判定。
+
+- `iter_ring_camera_samples`:在 [min_radius, max_radius] 环形区域内按栅格步长
+  枚举 free + 与障碍距离 >= clearance 的候选相机点。
+- `_has_full_width_occupancy_visibility`:用占用图判断"人的全身宽度左右两端
+  到相机的连线是否完全无遮挡"——若是,可以直接给分 1.0,不再渲 seg。
+- `select_capture_candidates`:从 score_field 中按分数带挑选最终渲染候选。
+- `ScoreFieldPoint` / `GroundCandidate` 数据类。
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import json
-from math import atan2, cos, sin
-from pathlib import Path
+from math import atan2
 import random
-
-from collector.sampling import GroundCandidate
 
 
 @dataclass
@@ -21,6 +26,15 @@ class ScoreFieldPoint:
     visible_person_pixels: int = 0
     total_person_pixels: int = 0
     scoring_mode: str = "segmentation_visibility"
+
+
+@dataclass
+class GroundCandidate:
+    x: float
+    y: float
+    z: float
+    hit_path: str | None
+    yaw_rad: float | None = None
 
 
 def _iter_grid_line_cells(row0: int, col0: int, row1: int, col1: int):
@@ -90,7 +104,13 @@ def _has_full_width_occupancy_visibility(
     )
 
 
-def _iter_annulus_xy(person_x: float, person_y: float, min_radius_m: float, max_radius_m: float, grid_step_m: float):
+def _iter_annulus_xy(
+    person_x: float,
+    person_y: float,
+    min_radius_m: float,
+    max_radius_m: float,
+    grid_step_m: float,
+):
     import numpy as np
 
     half = float(max_radius_m) + float(grid_step_m)
@@ -142,86 +162,6 @@ def iter_ring_camera_samples(
         }
 
 
-def generate_segmentation_score_field(
-    occupancy_map,
-    person_position_xy: tuple[float, float],
-    camera_height_m: float,
-    min_radius_m: float,
-    max_radius_m: float,
-    grid_step_m: float,
-    visibility_batch_scorer,
-    occupancy_full_visibility_width_m: float = 0.25,
-    min_camera_obstacle_distance_m: float = 0.0,
-) -> list[ScoreFieldPoint]:
-    samples = list(
-        iter_ring_camera_samples(
-            occupancy_map=occupancy_map,
-            person_position_xy=person_position_xy,
-            camera_height_m=camera_height_m,
-            min_radius_m=min_radius_m,
-            max_radius_m=max_radius_m,
-            grid_step_m=grid_step_m,
-            min_obstacle_distance_m=min_camera_obstacle_distance_m,
-        )
-    )
-    if not samples:
-        return []
-
-    field: list[ScoreFieldPoint] = []
-    segmentation_samples: list[dict] = []
-    segmentation_indices: list[int] = []
-    for index, sample in enumerate(samples):
-        if _has_full_width_occupancy_visibility(
-            occupancy_map=occupancy_map,
-            person_position_xy=person_position_xy,
-            camera_position_xy=(float(sample["x"]), float(sample["y"])),
-            body_width_m=float(occupancy_full_visibility_width_m),
-        ):
-            field.append(
-                ScoreFieldPoint(
-                    x=sample["x"],
-                    y=sample["y"],
-                    z=sample["z"],
-                    camera_z=sample["camera_z"],
-                    yaw_rad=sample["yaw_rad"],
-                    score=1.0,
-                    distance_m=sample["distance_m"],
-                    visible_person_pixels=1,
-                    total_person_pixels=1,
-                    scoring_mode="occupancy_full_visibility",
-                )
-            )
-        else:
-            field.append(None)
-            segmentation_samples.append(sample)
-            segmentation_indices.append(index)
-
-    visibility_results = visibility_batch_scorer(segmentation_samples) if segmentation_samples else []
-    for field_index, sample, result in zip(segmentation_indices, segmentation_samples, visibility_results):
-        visibility_ratio, visible_person_pixels, total_person_pixels = result
-        field[field_index] = (
-            ScoreFieldPoint(
-                x=sample["x"],
-                y=sample["y"],
-                z=sample["z"],
-                camera_z=sample["camera_z"],
-                yaw_rad=sample["yaw_rad"],
-                score=float(visibility_ratio),
-                distance_m=sample["distance_m"],
-                visible_person_pixels=int(visible_person_pixels),
-                total_person_pixels=int(total_person_pixels),
-                scoring_mode="segmentation_visibility",
-            )
-        )
-    return [item for item in field if item is not None]
-
-
-def save_score_field(path: Path, score_field: list[ScoreFieldPoint]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = [asdict(item) for item in score_field]
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-
 def select_capture_candidates(
     score_field: list[ScoreFieldPoint],
     score_min: float,
@@ -229,7 +169,7 @@ def select_capture_candidates(
     seed: int = 0,
     max_candidates: int | None = None,
     fallback_to_nearest: bool = True,
-) -> list[GroundCandidate]:
+) -> list[ScoreFieldPoint]:
     eligible = [item for item in score_field if float(score_min) <= item.score <= float(score_max)]
     used_fallback = False
     if not eligible and fallback_to_nearest:
@@ -250,14 +190,15 @@ def select_capture_candidates(
         rng.shuffle(eligible)
     if max_candidates is not None:
         eligible = eligible[: int(max_candidates)]
+    return list(eligible)
 
-    return [
-        GroundCandidate(
-            x=item.x,
-            y=item.y,
-            z=item.z,
-            hit_path=None,
-            yaw_rad=item.yaw_rad,
-        )
-        for item in eligible
-    ]
+
+# 保持和旧 collector.score_field.save_score_field 接口一致,方便未来替换。
+def save_score_field(path, score_field: list[ScoreFieldPoint]) -> None:
+    import json
+    from pathlib import Path
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [asdict(item) for item in score_field]
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

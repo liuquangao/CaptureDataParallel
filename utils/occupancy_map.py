@@ -1,3 +1,8 @@
+"""InteriorGS 占用图加载与坐标系转换。
+
+只负责 map 本体(像素数据、free/occupied/unknown mask、世界-栅格转换、
+基于 room polygon 的采样约束)。绘图 overlay 请见 utils/occupancy_overlay.py。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,7 +12,6 @@ from pathlib import Path
 import random
 
 import numpy as np
-import yaml
 from PIL import Image, ImageDraw
 
 
@@ -103,8 +107,7 @@ class OccupancyMap:
         rng.shuffle(indices)
         for idx in indices:
             row, col = free_cells[idx]
-            world_xy = self.grid_to_world(int(row), int(col))
-            return world_xy
+            return self.grid_to_world(int(row), int(col))
         raise RuntimeError("Occupancy map contains no free cells")
 
     def sample_room_free_world_point(self, rng: random.Random | None = None) -> tuple[float, float]:
@@ -120,8 +123,7 @@ class OccupancyMap:
         rng.shuffle(indices)
         for idx in indices:
             row, col = room_free_cells[idx]
-            world_xy = self.grid_to_world(int(row), int(col))
-            return world_xy
+            return self.grid_to_world(int(row), int(col))
         raise RuntimeError("Occupancy map contains no free cells inside room polygons")
 
     def sample_room_free_world_point_with_constraints(
@@ -213,172 +215,8 @@ def _resolve_interiorgs_scene_dir(scene_cfg: dict) -> Path:
     return matches[0]
 
 
-def _resolve_occupancy_yaml(scene_cfg: dict) -> Path:
-    explicit = scene_cfg.get("occupancy_map_yaml")
-    if explicit:
-        path = Path(explicit)
-        if not path.exists():
-            raise FileNotFoundError(f"Occupancy YAML does not exist: {path}")
-        return path
-
-    stage_url = scene_cfg.get("stage_url")
-    if not stage_url:
-        raise ValueError("Missing required config field: stage_url")
-    candidate = Path(stage_url).resolve().parent / "occupancy_map.yaml"
-    if not candidate.exists():
-        raise FileNotFoundError(
-            f"Could not infer occupancy_map.yaml next to scene: {candidate}"
-        )
-    return candidate
-
-
-def load_interiorgs_occupancy_map(scene_cfg: dict) -> OccupancyMap:
-    scene_dir = _resolve_interiorgs_scene_dir(scene_cfg)
-    json_path = scene_dir / "occupancy.json"
-    image_path = scene_dir / "occupancy.png"
-    if not json_path.exists():
-        raise FileNotFoundError(f"InteriorGS occupancy.json does not exist: {json_path}")
-    if not image_path.exists():
-        raise FileNotFoundError(f"InteriorGS occupancy.png does not exist: {image_path}")
-
-    with json_path.open("r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    data = np.array(Image.open(image_path).convert("L"))
-    if data.ndim != 2:
-        raise ValueError(f"Expected grayscale occupancy image, got shape {data.shape}")
-
-    free_mask = data == 255
-    occupied_mask = data == 0
-    unknown_mask = data == 127
-
-    occupancy_map = OccupancyMap(
-        image_path=image_path,
-        yaml_path=json_path,
-        resolution=float(meta["scale"]),
-        origin_xy=(float(meta["min"][0]), float(meta["min"][1])),
-        width=int(data.shape[1]),
-        height=int(data.shape[0]),
-        data=data,
-        free_mask=free_mask,
-        occupied_mask=occupied_mask,
-        unknown_mask=unknown_mask,
-        flip_x=bool(scene_cfg.get("occupancy_flip_x", True)),
-        flip_y=bool(scene_cfg.get("occupancy_flip_y", True)),
-        negate_xy=bool(scene_cfg.get("occupancy_negate_xy", True)),
-    )
-    structure_path = scene_dir / "structure.json"
-    if structure_path.exists():
-        occupancy_map.room_free_mask = _build_interiorgs_room_free_mask(
-            structure_path=structure_path,
-            occupancy_meta=meta,
-            occupancy_shape=data.shape,
-            free_mask=free_mask,
-        )
-    return occupancy_map
-
-
-def load_occupancy_map(scene_cfg: dict) -> OccupancyMap:
-    yaml_path = _resolve_occupancy_yaml(scene_cfg)
-    with yaml_path.open("r", encoding="utf-8") as f:
-        meta = yaml.safe_load(f)
-
-    image_rel = meta["image"]
-    image_path = (yaml_path.parent / image_rel).resolve()
-    if not image_path.exists():
-        raise FileNotFoundError(f"Occupancy image does not exist: {image_path}")
-
-    data = np.array(Image.open(image_path))
-    if data.ndim != 2:
-        raise ValueError(f"Expected grayscale occupancy image, got shape {data.shape}")
-
-    free_mask = data == 255
-    occupied_mask = data == 127
-    unknown_mask = data == 0
-
-    return OccupancyMap(
-        image_path=image_path,
-        yaml_path=yaml_path,
-        resolution=float(meta["resolution"]),
-        origin_xy=(float(meta["origin"][0]), float(meta["origin"][1])),
-        width=int(data.shape[1]),
-        height=int(data.shape[0]),
-        data=data,
-        free_mask=free_mask,
-        occupied_mask=occupied_mask,
-        unknown_mask=unknown_mask,
-        flip_x=bool(scene_cfg.get("occupancy_flip_x", False)),
-        flip_y=bool(scene_cfg.get("occupancy_flip_y", False)),
-        negate_xy=bool(scene_cfg.get("occupancy_negate_xy", False)),
-    )
-
-
-def summarize_occupancy_map(occupancy_map: OccupancyMap, num_samples: int = 5) -> OccupancySummary:
-    rng = random.Random(0)
-    samples = [occupancy_map.sample_free_world_point(rng) for _ in range(num_samples)]
-    return OccupancySummary(
-        yaml_path=str(occupancy_map.yaml_path),
-        image_path=str(occupancy_map.image_path),
-        resolution=occupancy_map.resolution,
-        origin_xy=occupancy_map.origin_xy,
-        width=occupancy_map.width,
-        height=occupancy_map.height,
-        free_cells=int(occupancy_map.free_mask.sum()),
-        occupied_cells=int(occupancy_map.occupied_mask.sum()),
-        unknown_cells=int(occupancy_map.unknown_mask.sum()),
-        sampled_world_points=samples,
-    )
-
-
-def save_occupancy_overlay(
-    occupancy_map: OccupancyMap,
-    candidates: list,
-    out_path: str | Path,
-    person_position_xy: tuple[float, float] | None = None,
-) -> Path:
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    base = np.asarray(occupancy_map.data, dtype=np.uint8)
-    rgb = np.stack([base, base, base], axis=-1)
-
-    # Make the three occupancy states easier to distinguish visually.
-    rgb[occupancy_map.free_mask] = np.array([240, 240, 240], dtype=np.uint8)
-    rgb[occupancy_map.occupied_mask] = np.array([40, 40, 40], dtype=np.uint8)
-    rgb[occupancy_map.unknown_mask] = np.array([150, 150, 150], dtype=np.uint8)
-
-    image = Image.fromarray(rgb, mode="RGB")
-    draw = ImageDraw.Draw(image)
-
-    radius = 3
-    for idx, candidate in enumerate(candidates):
-        row, col = occupancy_map.world_to_grid(float(candidate.x), float(candidate.y))
-        if 0 <= row < occupancy_map.height and 0 <= col < occupancy_map.width:
-            draw.ellipse(
-                (col - radius, row - radius, col + radius, row + radius),
-                fill=(255, 64, 64),
-                outline=(0, 0, 0),
-            )
-            draw.text((col + radius + 1, row - radius - 1), str(idx), fill=(0, 180, 0))
-
-    if person_position_xy is not None:
-        person_x, person_y = person_position_xy
-        row, col = occupancy_map.world_to_grid(float(person_x), float(person_y))
-        if 0 <= row < occupancy_map.height and 0 <= col < occupancy_map.width:
-            person_radius = 5
-            draw.ellipse(
-                (col - person_radius, row - person_radius, col + person_radius, row + person_radius),
-                fill=(64, 96, 255),
-                outline=(255, 255, 255),
-            )
-            draw.text((col + person_radius + 2, row - person_radius - 1), "P", fill=(32, 32, 255))
-
-    image.save(out_path)
-    return out_path
-
-
 def _world_to_occupancy_pixel(
-    xy: list[list[float]] | list[tuple[float, float]] | np.ndarray,
+    xy,
     scale: float,
     lower: tuple[float, float],
     upper: tuple[float, float],
@@ -429,76 +267,64 @@ def _build_interiorgs_room_free_mask(
     return np.logical_and(room_mask, free_mask)
 
 
-def save_score_field_overlay(
-    occupancy_map: OccupancyMap,
-    score_field: list,
-    out_path: str | Path,
-    person_position_xy: tuple[float, float] | None = None,
-    selected_candidates: list | None = None,
-) -> Path:
-    def _star_points(center_x: float, center_y: float, outer_radius: float, inner_radius: float) -> list[tuple[float, float]]:
-        points: list[tuple[float, float]] = []
-        for index in range(10):
-            angle = -math.pi / 2.0 + index * math.pi / 5.0
-            radius = outer_radius if index % 2 == 0 else inner_radius
-            points.append(
-                (
-                    float(center_x + radius * math.cos(angle)),
-                    float(center_y + radius * math.sin(angle)),
-                )
-            )
-        return points
+def load_interiorgs_occupancy_map(scene_cfg: dict) -> OccupancyMap:
+    scene_dir = _resolve_interiorgs_scene_dir(scene_cfg)
+    json_path = scene_dir / "occupancy.json"
+    image_path = scene_dir / "occupancy.png"
+    if not json_path.exists():
+        raise FileNotFoundError(f"InteriorGS occupancy.json does not exist: {json_path}")
+    if not image_path.exists():
+        raise FileNotFoundError(f"InteriorGS occupancy.png does not exist: {image_path}")
 
-    def _jet_color(score: float) -> tuple[int, int, int]:
-        s = float(np.clip(score, 0.0, 1.0))
-        r = np.clip(1.5 - abs(4.0 * s - 3.0), 0.0, 1.0)
-        g = np.clip(1.5 - abs(4.0 * s - 2.0), 0.0, 1.0)
-        b = np.clip(1.5 - abs(4.0 * s - 1.0), 0.0, 1.0)
-        return (int(r * 255.0), int(g * 255.0), int(b * 255.0))
+    with json_path.open("r", encoding="utf-8") as f:
+        meta = json.load(f)
 
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.array(Image.open(image_path).convert("L"))
+    if data.ndim != 2:
+        raise ValueError(f"Expected grayscale occupancy image, got shape {data.shape}")
 
-    base = np.asarray(occupancy_map.data, dtype=np.uint8)
-    rgb = np.stack([base, base, base], axis=-1)
-    rgb[occupancy_map.free_mask] = np.array([240, 240, 240], dtype=np.uint8)
-    rgb[occupancy_map.occupied_mask] = np.array([40, 40, 40], dtype=np.uint8)
-    rgb[occupancy_map.unknown_mask] = np.array([150, 150, 150], dtype=np.uint8)
+    free_mask = data == 255
+    occupied_mask = data == 0
+    unknown_mask = data == 127
 
-    image = Image.fromarray(rgb, mode="RGB")
-    draw = ImageDraw.Draw(image)
+    occupancy_map = OccupancyMap(
+        image_path=image_path,
+        yaml_path=json_path,
+        resolution=float(meta["scale"]),
+        origin_xy=(float(meta["min"][0]), float(meta["min"][1])),
+        width=int(data.shape[1]),
+        height=int(data.shape[0]),
+        data=data,
+        free_mask=free_mask,
+        occupied_mask=occupied_mask,
+        unknown_mask=unknown_mask,
+        flip_x=bool(scene_cfg.get("occupancy_flip_x", True)),
+        flip_y=bool(scene_cfg.get("occupancy_flip_y", True)),
+        negate_xy=bool(scene_cfg.get("occupancy_negate_xy", True)),
+    )
+    structure_path = scene_dir / "structure.json"
+    if structure_path.exists():
+        occupancy_map.room_free_mask = _build_interiorgs_room_free_mask(
+            structure_path=structure_path,
+            occupancy_meta=meta,
+            occupancy_shape=data.shape,
+            free_mask=free_mask,
+        )
+    return occupancy_map
 
-    for item in score_field:
-        row, col = occupancy_map.world_to_grid(float(item.x), float(item.y))
-        if not (0 <= row < occupancy_map.height and 0 <= col < occupancy_map.width):
-            continue
 
-        score = float(item.score)
-        fill = _jet_color(score)
-        radius = 2
-        draw.ellipse((col - radius, row - radius, col + radius, row + radius), fill=fill, outline=fill)
-
-    if selected_candidates is not None:
-        for candidate in selected_candidates:
-            row, col = occupancy_map.world_to_grid(float(candidate.x), float(candidate.y))
-            if not (0 <= row < occupancy_map.height and 0 <= col < occupancy_map.width):
-                continue
-            draw.polygon(
-                _star_points(float(col), float(row), outer_radius=4.0, inner_radius=1.8),
-                fill=(64, 200, 64),
-                outline=(255, 255, 255),
-            )
-
-    if person_position_xy is not None:
-        person_x, person_y = person_position_xy
-        row, col = occupancy_map.world_to_grid(float(person_x), float(person_y))
-        if 0 <= row < occupancy_map.height and 0 <= col < occupancy_map.width:
-            person_radius = 3
-            draw.ellipse(
-                (col - person_radius, row - person_radius, col + person_radius, row + person_radius),
-                fill=(64, 96, 255),
-                outline=(255, 255, 255),
-            )
-
-    image.save(out_path)
-    return out_path
+def summarize_occupancy_map(occupancy_map: OccupancyMap, num_samples: int = 5) -> OccupancySummary:
+    rng = random.Random(0)
+    samples = [occupancy_map.sample_free_world_point(rng) for _ in range(num_samples)]
+    return OccupancySummary(
+        yaml_path=str(occupancy_map.yaml_path),
+        image_path=str(occupancy_map.image_path),
+        resolution=occupancy_map.resolution,
+        origin_xy=occupancy_map.origin_xy,
+        width=occupancy_map.width,
+        height=occupancy_map.height,
+        free_cells=int(occupancy_map.free_mask.sum()),
+        occupied_cells=int(occupancy_map.occupied_mask.sum()),
+        unknown_cells=int(occupancy_map.unknown_mask.sum()),
+        sampled_world_points=samples,
+    )
