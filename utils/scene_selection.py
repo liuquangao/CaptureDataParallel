@@ -93,6 +93,10 @@ def resolve_scene_configs(cfg: dict) -> list[dict]:
     else:
         raise ValueError(f"Unsupported dataset.selection.mode: {mode}")
 
+    excluded = {str(sid) for sid in selection_cfg.get("exclude_scene_ids", [])}
+    if excluded:
+        scene_ids = [sid for sid in scene_ids if sid not in excluded]
+
     missing = [sid for sid in scene_ids if sid not in all_scene_ids]
     if missing:
         raise FileNotFoundError(f"Requested scene ids not found under {stage_root}: {missing}")
@@ -113,15 +117,22 @@ def check_scene_filter(occupancy_map, cfg: dict) -> tuple[bool, str | None]:
     """根据 scene_filter.max_free_ratio 判断是否跳过当前场景。"""
     scene_filter_cfg = cfg.get("scene_filter", {}) or {}
     max_free_ratio = scene_filter_cfg.get("max_free_ratio")
-    if max_free_ratio is None:
-        return False, None
     total = int(occupancy_map.width) * int(occupancy_map.height)
-    if total <= 0:
-        return False, None
-    free_ratio = float(int(occupancy_map.free_mask.sum())) / float(total)
-    if free_ratio > float(max_free_ratio):
-        return True, (
-            f"occupancy free_ratio={free_ratio:.3f} > max_free_ratio={float(max_free_ratio):.3f} "
-            f"(likely unclosed / unbounded scene)"
-        )
+    if max_free_ratio is not None and total > 0:
+        free_ratio = float(int(occupancy_map.free_mask.sum())) / float(total)
+        if free_ratio > float(max_free_ratio):
+            return True, (
+                f"occupancy free_ratio={free_ratio:.3f} > max_free_ratio={float(max_free_ratio):.3f} "
+                f"(likely unclosed / unbounded scene)"
+            )
+
+    min_room_free_area_m2 = scene_filter_cfg.get("min_room_free_area_m2")
+    if min_room_free_area_m2 is not None:
+        usable_mask = occupancy_map.room_free_mask if occupancy_map.room_free_mask is not None else occupancy_map.free_mask
+        usable_area_m2 = float(int(usable_mask.sum())) * float(occupancy_map.resolution) ** 2
+        if usable_area_m2 < float(min_room_free_area_m2):
+            return True, (
+                f"room_free_area_m2={usable_area_m2:.3f} < "
+                f"min_room_free_area_m2={float(min_room_free_area_m2):.3f}"
+            )
     return False, None

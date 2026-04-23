@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 
 
-REPO_ROOT = Path("/home/leo/FusionLab/CaptureData")
-JSON_PATH = REPO_ROOT / "outputs/839873/pos_000/person_bbox/001.json"
-IMAGE_PATH = REPO_ROOT / "outputs/839873/pos_000/rgb/001.png"
-OUTPUT_PATH = REPO_ROOT / "outputs/839873/pos_000/rgb/001_debug_bbox.png"
+REPO_ROOT = Path("/home/leo/FusionLab/CaptureDataParallel")
+JSON_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/person_bbox/009.json"
+IMAGE_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/rgb/009.png"
+OUTPUT_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/rgb/009_debug_bbox.png"
 
 
 def load_bbox(json_path: Path) -> list[float]:

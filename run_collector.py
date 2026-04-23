@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import resource
 import sys
 import time
@@ -50,6 +51,47 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_num_positions_for_scene(
+    config: dict,
+    occupancy_map,
+    default_num_positions: int,
+) -> tuple[int, str]:
+    position_sampling_cfg = config.get("position_sampling", {}) or {}
+    area_rules = position_sampling_cfg.get("area_to_num_positions")
+    if not area_rules:
+        return int(default_num_positions), f"fixed num_positions={int(default_num_positions)}"
+
+    metric = str(position_sampling_cfg.get("metric", "room_free_area_m2"))
+    if metric == "room_free_area_m2":
+        usable_mask = occupancy_map.room_free_mask if occupancy_map.room_free_mask is not None else occupancy_map.free_mask
+    elif metric == "free_area_m2":
+        usable_mask = occupancy_map.free_mask
+    else:
+        raise ValueError(f"Unsupported position_sampling.metric: {metric}")
+
+    usable_area_m2 = float(int(usable_mask.sum())) * float(occupancy_map.resolution) ** 2
+    for rule in area_rules:
+        max_area_m2 = float(rule["max_area_m2"])
+        num_positions = int(rule["num_positions"])
+        if usable_area_m2 < max_area_m2:
+            return num_positions, f"{metric}={usable_area_m2:.3f} < {max_area_m2:.3f}"
+
+    fallback_num_positions = int(position_sampling_cfg.get("default_num_positions", default_num_positions))
+    return fallback_num_positions, f"{metric}={usable_area_m2:.3f} >= all thresholds"
+
+
+def _filter_existing_scene_outputs(scene_configs: list[dict], output_root: Path) -> tuple[list[dict], list[str]]:
+    pending: list[dict] = []
+    skipped: list[str] = []
+    for scene_cfg in scene_configs:
+        scene_id = str(scene_cfg.get("name", Path(scene_cfg["stage_url"]).stem))
+        if (output_root / scene_id).is_dir():
+            skipped.append(scene_id)
+            continue
+        pending.append(scene_cfg)
+    return pending, skipped
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -65,6 +107,19 @@ def main() -> None:
     carb.settings.get_settings().set("/log/level", "error")
     # 压掉 carb 插件框架/hydratexture 的 Warning(走独立 output stream,不受 /log/level 约束)
     carb.settings.get_settings().set("/log/outputStreamLevel", "Error")
+    runtime_settings = carb.settings.get_settings()
+    print(
+        "[SDG] Runtime RTX settings(before override): "
+        f"/rtx/post/aa/op={runtime_settings.get('/rtx/post/aa/op')}, "
+        f"/rtx/post/dlss/execMode={runtime_settings.get('/rtx/post/dlss/execMode')}"
+    )
+    runtime_settings.set("/rtx/post/aa/op", 1)
+    runtime_settings.set("/rtx/post/dlss/execMode", 0)
+    print(
+        "[SDG] Runtime RTX settings(after override): "
+        f"/rtx/post/aa/op={runtime_settings.get('/rtx/post/aa/op')}, "
+        f"/rtx/post/dlss/execMode={runtime_settings.get('/rtx/post/dlss/execMode')}"
+    )
 
     import numpy as np
     import omni.replicator.core as rep
@@ -87,7 +142,7 @@ def main() -> None:
     )
     from utils.occupancy_map import load_interiorgs_occupancy_map
     from utils.occupancy_overlay import save_score_field_overlay
-    from utils.person_placement import place_person
+    from utils.person_placement import place_person, place_person_near_anchor
     from utils.replicator_tools import (
         create_camera_pool,
         iter_batches,
@@ -104,7 +159,7 @@ def main() -> None:
         select_capture_candidates,
     )
     from utils.scene_selection import check_scene_filter, resolve_scene_configs
-    from utils.score import read_person_counts
+    from utils.score import read_semantic_counts
 
     carb_settings = carb.settings.get_settings()
 
@@ -126,16 +181,20 @@ def main() -> None:
     score_field_cfg = config["score_field"]
     sampling_cfg = config.get("sampling", {})
     camera_cfg = config["camera"]
+    person_cfg = config["person"]
     resolution = tuple(camera_cfg["resolution"])
     focal_length = float(camera_cfg["focal_length"])
+    # RTX 默认 horizontal fit,保证方形像素
     horizontal_aperture = float(_REP_DEFAULT_HORIZONTAL_APERTURE)
-    vertical_aperture = float(_REP_DEFAULT_HORIZONTAL_APERTURE)
+    vertical_aperture = float(_REP_DEFAULT_HORIZONTAL_APERTURE) * float(resolution[1]) / float(resolution[0])
+
     camera_z = float(camera_cfg.get("camera_height", 0.4))
+    capture_yaw_jitter_margin = float(camera_cfg.get("capture_yaw_jitter_margin", 0.0))
 
     num_cameras = int(config["num_cameras"])
     rt_subframes = int(config.get("rt_subframes", 2))
 
-    num_positions = int(config.get("num_positions", 1))
+    default_num_positions = int(config.get("num_positions", 1))
     base_seed = int(sampling_cfg.get("seed", 42))
     min_position_distance = float(sampling_cfg.get("min_position_distance_m", 3.0))
     character_min_obstacle = float(sampling_cfg.get("character_min_obstacle_distance_m", 0.2))
@@ -145,11 +204,32 @@ def main() -> None:
     capture_score_min = float(score_field_cfg["capture_score_min"])
     capture_score_max = float(score_field_cfg["capture_score_max"])
     output_root = Path(config["backend_params"]["output_dir"])
+    primary_person_url = str(person_cfg["url"])
+    secondary_person_url = str(person_cfg.get("secondary_url", primary_person_url))
+    capture_fx = float(resolution[0]) * float(focal_length) / max(float(horizontal_aperture), 1e-6)
+    effective_margin = min(max(capture_yaw_jitter_margin, 0.0), 0.49)
+    capture_yaw_delta_max = math.atan((0.5 - effective_margin) * float(resolution[0]) / max(capture_fx, 1e-6))
+    pair_cfg = config.get("pair_sampling", {})
+    pair_enabled = bool(pair_cfg.get("enabled", False))
+    pair_min_distance = float(pair_cfg.get("min_pair_distance_m", 1.5))
+    pair_max_distance = float(pair_cfg.get("max_pair_distance_m", 3.5))
+    second_person_min_obstacle = float(
+        pair_cfg.get("second_person_min_obstacle_distance_m", character_min_obstacle)
+    )
+    pair_require_connectivity = bool(pair_cfg.get("require_pair_connectivity", True))
+    max_second_person_attempts = max(1, int(pair_cfg.get("max_second_person_attempts", 12)))
+    max_pair_layout_attempts = max(1, int(pair_cfg.get("max_pair_layout_attempts", 6)))
 
     # ------------------------------------------------------------------
     # 1. 解析要采的场景列表
     # ------------------------------------------------------------------
     scene_configs = resolve_scene_configs(config)
+    skip_existing_scene_dirs = bool(config.get("backend_params", {}).get("skip_existing_scene_dirs", False))
+    if skip_existing_scene_dirs:
+        scene_configs, skipped_existing_scenes = _filter_existing_scene_outputs(scene_configs, output_root)
+        print(
+            f"[SDG] Skipped {len(skipped_existing_scenes)} existing scene output dir(s) under {output_root}"
+        )
     print(f"[SDG] Resolved {len(scene_configs)} scene(s) to collect")
 
     filtered_scenes: list[tuple[str, str]] = []
@@ -175,6 +255,13 @@ def main() -> None:
             print(f"[SDG] {scene_id}: skipped by scene_filter ({reason})")
             filtered_scenes.append((scene_id, reason or ""))
             continue
+
+        num_positions_scene, num_positions_reason = _resolve_num_positions_for_scene(
+            config=config,
+            occupancy_map=occupancy_map,
+            default_num_positions=default_num_positions,
+        )
+        print(f"[SDG] {scene_id}: num_positions={num_positions_scene} ({num_positions_reason})")
 
         # --- 2.2 打开 stage + 场景级设置 ---
         print(f"[SDG] {scene_id}: loading stage {stage_url}")
@@ -231,11 +318,14 @@ def main() -> None:
         existing_world_points_xy: list[tuple[float, float]] = []
         person_prim_path = "/SDG/Person"
         person_initialized = False
+        pair_initialized = False
+        context_person_prim_path = "/SDG/Persons/person_001"
+        pair_labels_initialized = False
 
         # ------------------------------------------------------------------
         # 3. 多 pos 循环(在当前 scene 内)
         # ------------------------------------------------------------------
-        for pos_idx in range(num_positions):
+        for pos_idx in range(num_positions_scene):
             pos_tag = f"pos_{pos_idx:03d}"
             print(f"\n[SDG] ===== {scene_id} / {pos_tag} =====")
             pos_dir = output_root / scene_id / pos_tag
@@ -246,325 +336,420 @@ def main() -> None:
 
             # --- 3.1 放置/移动人物(按 max_attempts 重试,seed 每次换) ---
             person_xyz = None
+            context_person_xyz = None
             for attempt in range(max_attempts):
                 attempt_seed = base_seed + pos_idx * 10007 + attempt * 17
                 try:
-                    debug_char = place_person(
-                        stage=stage,
-                        occupancy_map=occupancy_map,
-                        prim_path=person_prim_path,
-                        seed=attempt_seed,
-                        character_usd_path=config["person"]["url"],
-                        arm_drop_degrees=float(config.get("scene", {}).get("character_arm_drop_degrees", 75.0)),
-                        min_obstacle_distance_m=character_min_obstacle,
-                        existing_world_points_xy=existing_world_points_xy if existing_world_points_xy else None,
-                        min_point_distance_m=min_position_distance,
-                        reuse_existing_prim=person_initialized,
-                    )
-                    person_xyz = debug_char["position"]
+                    if pair_enabled:
+                        primary_result = place_person(
+                            stage=stage,
+                            occupancy_map=occupancy_map,
+                            prim_path="/SDG/Persons/person_000",
+                            seed=attempt_seed,
+                            character_usd_path=primary_person_url,
+                            arm_drop_degrees=float(
+                                config.get("scene", {}).get("character_arm_drop_degrees", 75.0)
+                            ),
+                            min_obstacle_distance_m=character_min_obstacle,
+                            existing_world_points_xy=existing_world_points_xy if existing_world_points_xy else None,
+                            min_point_distance_m=min_position_distance,
+                            reuse_existing_prim=pair_initialized,
+                        )
+                        person_prim_path = primary_result["prim_path"]
+                        person_xyz = primary_result["position"]
+                        secondary_result = None
+                        for pair_attempt in range(max_pair_layout_attempts):
+                            secondary_seed = attempt_seed + pair_attempt * 101 + 1
+                            try:
+                                secondary_result = place_person_near_anchor(
+                                    stage=stage,
+                                    occupancy_map=occupancy_map,
+                                    anchor_position_xy=(float(person_xyz[0]), float(person_xyz[1])),
+                                    prim_path=context_person_prim_path,
+                                    seed=secondary_seed,
+                                    character_usd_path=secondary_person_url,
+                                    arm_drop_degrees=float(
+                                        config.get("scene", {}).get("character_arm_drop_degrees", 75.0)
+                                    ),
+                                    min_distance_m=pair_min_distance,
+                                    max_distance_m=pair_max_distance,
+                                    min_obstacle_distance_m=second_person_min_obstacle,
+                                    require_pair_connectivity=pair_require_connectivity,
+                                    reuse_existing_prim=pair_initialized,
+                                )
+                                break
+                            except Exception as pair_exc:  # noqa: BLE001
+                                print(
+                                    f"[SDG]   secondary placement attempt {pair_attempt} "
+                                    f"(seed={secondary_seed}) failed: {pair_exc}"
+                                )
+                        if secondary_result is None:
+                            raise RuntimeError("failed to place secondary person near primary person")
+                        context_person_xyz = secondary_result["position"]
+                        pair_initialized = True
+                    else:
+                        debug_char = place_person(
+                            stage=stage,
+                            occupancy_map=occupancy_map,
+                            prim_path=person_prim_path,
+                            seed=attempt_seed,
+                            character_usd_path=primary_person_url,
+                            arm_drop_degrees=float(config.get("scene", {}).get("character_arm_drop_degrees", 75.0)),
+                            min_obstacle_distance_m=character_min_obstacle,
+                            existing_world_points_xy=existing_world_points_xy if existing_world_points_xy else None,
+                            min_point_distance_m=min_position_distance,
+                            reuse_existing_prim=person_initialized,
+                        )
+                        person_xyz = debug_char["position"]
                     break
                 except Exception as exc:  # noqa: BLE001
+                    person_xyz = None
+                    context_person_xyz = None
                     print(f"[SDG]   place_person attempt {attempt} (seed={attempt_seed}) failed: {exc}")
 
             if person_xyz is None:
                 print(f"[SDG] {pos_tag}: failed after {max_attempts} attempts; skipping pos.")
                 continue
             print(f"[SDG] {pos_tag} person position: {person_xyz}")
-            if not person_initialized:
+            if context_person_xyz is not None:
+                print(f"[SDG] {pos_tag} context person position: {context_person_xyz}")
+            if pair_enabled:
+                if not pair_labels_initialized:
+                    add_labels("/SDG/Persons/person_000", labels="person_000", taxonomy="class")
+                    add_labels(context_person_prim_path, labels="person_001", taxonomy="class")
+                    pair_labels_initialized = True
+                person_initialized = True
+            elif not person_initialized:
                 add_labels(person_prim_path, labels="person", taxonomy="class")
                 person_initialized = True
             for _ in range(warmup_updates):
                 simulation_app.update()
 
-            # --- 3.2 环形采样 + occupancy shortcut ---
-            ring_samples = list(
-                iter_ring_camera_samples(
-                    occupancy_map=occupancy_map,
-                    person_position_xy=(person_xyz[0], person_xyz[1]),
-                    camera_height_m=camera_z,
-                    min_radius_m=float(score_field_cfg["min_radius_m"]),
-                    max_radius_m=float(score_field_cfg["max_radius_m"]),
-                    grid_step_m=float(score_field_cfg["grid_step_m"]),
-                    min_obstacle_distance_m=float(score_field_cfg["camera_min_obstacle_distance_m"]),
-                )
-            )
-            print(f"[SDG] {pos_tag} ring produced {len(ring_samples)} candidate poses")
-            if not ring_samples:
-                print(f"[SDG] {pos_tag}: no ring samples; skipping pos.")
-                existing_world_points_xy.append((float(person_xyz[0]), float(person_xyz[1])))
-                continue
-
-            certain_indices: list[int] = []
-            uncertain_indices: list[int] = []
-            for i, pose in enumerate(ring_samples):
-                if _has_full_width_occupancy_visibility(
-                    occupancy_map=occupancy_map,
-                    person_position_xy=(person_xyz[0], person_xyz[1]),
-                    camera_position_xy=(pose["x"], pose["y"]),
-                    body_width_m=body_width_m,
-                ):
-                    certain_indices.append(i)
-                else:
-                    uncertain_indices.append(i)
-            uncertain_poses = [ring_samples[i] for i in uncertain_indices]
-            print(
-                f"[SDG] {pos_tag} occupancy shortcut: {len(certain_indices)} certain, "
-                f"{len(uncertain_indices)} uncertain -> rendering."
-            )
-
-            # --- 3.3 Pass 1/2 ---
-            uncertain_total_counts: list[int] = []
-            uncertain_visible_counts: list[int] = []
-            pass1_elapsed = 0.0
-            pass2_elapsed = 0.0
-            look_at_xyz = (float(person_xyz[0]), float(person_xyz[1]), float(person_xyz[2]) + 1.0)
-
-            if uncertain_poses:
-                print(f"[SDG] {pos_tag} Pass 1: hiding mesh, {len(uncertain_poses)} unoccluded views...")
-                _begin_render_pass(scene_mesh_visible=False)
-                pass1_start = time.perf_counter()
-                for batch in iter_batches(uncertain_poses, num_cameras):
-                    set_batch_poses(driver_cams, batch, look_at_xyz)
-                    rep.orchestrator.step(rt_subframes=rt_subframes)
-                    batch_counts = read_person_counts(seg_annotators)
-                    uncertain_total_counts.extend(batch_counts[: len(batch)])
-                pass1_elapsed = time.perf_counter() - pass1_start
-                _end_render_pass()
-                print(f"[SDG] {pos_tag} Pass 1 elapsed: {pass1_elapsed:.3f}s")
-
-                print(f"[SDG] {pos_tag} Pass 2: capturing {len(uncertain_poses)} occluded views...")
-                _begin_render_pass(scene_mesh_visible=True)
-                pass2_start = time.perf_counter()
-                for batch in iter_batches(uncertain_poses, num_cameras):
-                    set_batch_poses(driver_cams, batch, look_at_xyz)
-                    rep.orchestrator.step(rt_subframes=rt_subframes)
-                    batch_counts = read_person_counts(seg_annotators)
-                    uncertain_visible_counts.extend(batch_counts[: len(batch)])
-                pass2_elapsed = time.perf_counter() - pass2_start
-                _end_render_pass()
-                print(f"[SDG] {pos_tag} Pass 2 elapsed: {pass2_elapsed:.3f}s")
-
-            # --- 3.4 合并 score_field ---
-            score_field: list[ScoreFieldPoint] = []
-            poses_payload: list[dict | None] = [None] * len(ring_samples)
-
-            for i in certain_indices:
-                pose = ring_samples[i]
-                sf = ScoreFieldPoint(
-                    x=pose["x"], y=pose["y"], z=pose["z"],
-                    camera_z=pose["camera_z"], yaw_rad=pose["yaw_rad"],
-                    score=1.0, distance_m=pose["distance_m"],
-                    visible_person_pixels=1, total_person_pixels=1,
-                    scoring_mode="occupancy_full_visibility",
-                )
-                score_field.append(sf)
-                poses_payload[i] = {"idx": int(i), **asdict(sf)}
-
-            for idx_in_uncertain, i in enumerate(uncertain_indices):
-                pose = ring_samples[i]
-                vis = int(uncertain_visible_counts[idx_in_uncertain])
-                total = int(uncertain_total_counts[idx_in_uncertain])
-                score = float(vis) / float(total) if total > 0 else 0.0
-                sf = ScoreFieldPoint(
-                    x=pose["x"], y=pose["y"], z=pose["z"],
-                    camera_z=pose["camera_z"], yaw_rad=pose["yaw_rad"],
-                    score=score, distance_m=pose["distance_m"],
-                    visible_person_pixels=vis, total_person_pixels=total,
-                    scoring_mode="segmentation_visibility",
-                )
-                score_field.append(sf)
-                poses_payload[i] = {"idx": int(i), **asdict(sf)}
-
-            # --- 3.5 Stage 3: 挑 N 个 candidate + capture ---
-            selected = select_capture_candidates(
-                score_field=score_field,
-                score_min=capture_score_min,
-                score_max=capture_score_max,
-                seed=base_seed + pos_idx * 7919,
-                max_candidates=max_cap,
-                fallback_to_nearest=False,
-            )
-            print(f"[SDG] {pos_tag} selected {len(selected)} / {len(score_field)} candidates for capture.")
-
-            overlay_path = save_score_field_overlay(
-                occupancy_map=occupancy_map,
-                score_field=score_field,
-                out_path=pos_dir / "score_field_overlay.png",
-                person_position_xy=(float(person_xyz[0]), float(person_xyz[1])),
-                selected_candidates=selected if selected else None,
-            )
-            print(f"[SDG] {pos_tag} wrote overlay to {overlay_path}")
-
-            if not selected:
-                print(f"[SDG] {pos_tag}: no candidates in score range; skipping capture.")
-                existing_world_points_xy.append((float(person_xyz[0]), float(person_xyz[1])))
-                continue
-
-            capture_batch_input: list[dict] = []
-            view_meta: list[dict] = []
-            for sf in selected:
-                yaw = _camera_yaw_from_person((sf.x, sf.y), (person_xyz[0], person_xyz[1]))
-                quat = _yaw_to_world_quaternion(yaw)
-                capture_batch_input.append(
-                    {"x": float(sf.x), "y": float(sf.y), "camera_z": camera_z, "yaw_rad": float(yaw)}
-                )
-                view_meta.append(
+            targets = [
+                {
+                    "instance_id": "person_000",
+                    "semantic_label": "person_000" if pair_enabled else "person",
+                    "position": person_xyz,
+                }
+            ]
+            if pair_enabled and context_person_xyz is not None:
+                targets.append(
                     {
-                        "camera_position": (float(sf.x), float(sf.y), camera_z),
-                        "camera_orientation_wxyz": quat,
-                        "sampling_score": float(sf.score),
-                        "scoring_mode": str(sf.scoring_mode),
-                        "visible_person_pixels": int(sf.visible_person_pixels),
-                        "total_person_pixels": int(sf.total_person_pixels),
+                        "instance_id": "person_001",
+                        "semantic_label": "person_001",
+                        "position": context_person_xyz,
                     }
                 )
 
-            # 捕获前切高画质
-            print(f"[SDG] {pos_tag} switching render quality to PathTracing + DLSS execMode=2")
-            _set_high_quality()
+            for target_idx, target in enumerate(targets):
+                target_id = str(target["instance_id"])
+                target_semantic_label = str(target["semantic_label"])
+                target_person_xyz = target["position"]
+                target_dir = pos_dir / target_id
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_rng = np.random.default_rng(base_seed + pos_idx * 7919 + target_idx * 193)
 
-            # Pass A: scene_collision 隐藏 -> RGB + semantic seg (person bbox)
-            print(f"[SDG] {pos_tag} Capture Pass A: {len(capture_batch_input)} views...")
-            _begin_render_pass(scene_mesh_visible=False)
-            rgb_frames: list = [None] * len(capture_batch_input)
-            seg_frames: list = [None] * len(capture_batch_input)
-
-            passA_start = time.perf_counter()
-            view_idx = 0
-            for batch_idx, batch in enumerate(iter_batches(capture_batch_input, num_cameras)):
-                set_batch_poses_with_orientation(driver_cams, batch)
-                rep.orchestrator.step(rt_subframes=rt_subframes)
-                for i in range(len(batch)):
-                    rgb_frames[view_idx + i] = np.asarray(rgb_annotators[i].get_data())
-                    seg_frames[view_idx + i] = seg_annotators[i].get_data()
-                view_idx += len(batch)
-                print(f"[SDG]   Pass A batch {batch_idx}: {len(batch)} poses")
-            passA_elapsed = time.perf_counter() - passA_start
-            _end_render_pass()
-            print(f"[SDG] {pos_tag} Pass A elapsed: {passA_elapsed:.3f}s")
-
-            # Pass B: scene_collision 可见 -> depth
-            print(f"[SDG] {pos_tag} Capture Pass B: {len(capture_batch_input)} views...")
-            _begin_render_pass(scene_mesh_visible=True)
-            depth_frames: list = [None] * len(capture_batch_input)
-
-            passB_start = time.perf_counter()
-            view_idx = 0
-            for batch_idx, batch in enumerate(iter_batches(capture_batch_input, num_cameras)):
-                set_batch_poses_with_orientation(driver_cams, batch)
-                rep.orchestrator.step(rt_subframes=rt_subframes)
-                for i in range(len(batch)):
-                    depth_frames[view_idx + i] = np.asarray(
-                        depth_annotators[i].get_data(), dtype=np.float32
+                ring_samples = list(
+                    iter_ring_camera_samples(
+                        occupancy_map=occupancy_map,
+                        person_position_xy=(target_person_xyz[0], target_person_xyz[1]),
+                        camera_height_m=camera_z,
+                        min_radius_m=float(score_field_cfg["min_radius_m"]),
+                        max_radius_m=float(score_field_cfg["max_radius_m"]),
+                        grid_step_m=float(score_field_cfg["grid_step_m"]),
+                        min_obstacle_distance_m=float(score_field_cfg["camera_min_obstacle_distance_m"]),
                     )
-                view_idx += len(batch)
-                print(f"[SDG]   Pass B batch {batch_idx}: {len(batch)} poses")
-            passB_elapsed = time.perf_counter() - passB_start
-            _end_render_pass()
-            print(f"[SDG] {pos_tag} Pass B elapsed: {passB_elapsed:.3f}s")
-
-            # --- 逐视图后处理 + 落盘 ---
-            observations: list[dict] = []
-            scores_map: dict[str, float] = {}
-            for idx, meta in enumerate(view_meta):
-                cam_pos = meta["camera_position"]
-                orient = meta["camera_orientation_wxyz"]
-                rgb = rgb_frames[idx]
-                depth = depth_frames[idx]
-                seg_frame = seg_frames[idx]
-
-                stem = f"{idx:03d}"
-                rgb_path = pos_dir / "rgb" / f"{stem}.png"
-                depth_png_path = pos_dir / "depth" / f"{stem}.png"
-                depth_npy_path = pos_dir / "depth" / f"{stem}.npy"
-                ground_mask_path = pos_dir / "ground_mask" / f"{stem}.png"
-                score_map_path = pos_dir / "score_map" / f"{stem}.npy"
-                valid_mask_path = pos_dir / "valid_mask" / f"{stem}.npy"
-                yaw_map_path = pos_dir / "yaw_map" / f"{stem}.npy"
-                person_bbox_path = pos_dir / "person_bbox" / f"{stem}.json"
-
-                _save_rgb(rgb, rgb_path)
-                _save_depth(depth, depth_png_path, depth_npy_path)
-
-                ground_mask = _compute_ground_mask(
-                    depth_m=depth,
-                    camera_position=cam_pos,
-                    camera_orientation_wxyz=orient,
-                    resolution=resolution,
-                    focal_length=focal_length,
-                    horizontal_aperture=horizontal_aperture,
-                    vertical_aperture=vertical_aperture,
-                    occupancy_map=occupancy_map,
                 )
-                _save_ground_mask(ground_mask, ground_mask_path)
+                print(f"[SDG] {pos_tag} / {target_id} ring produced {len(ring_samples)} candidate poses")
+                if not ring_samples:
+                    print(f"[SDG] {pos_tag} / {target_id}: no ring samples; skipping target.")
+                    continue
 
-                score_map_arr, valid_mask_arr, yaw_map_arr = _compute_score_map(
+                certain_indices: list[int] = []
+                uncertain_indices: list[int] = []
+                for i, pose in enumerate(ring_samples):
+                    if _has_full_width_occupancy_visibility(
+                        occupancy_map=occupancy_map,
+                        person_position_xy=(target_person_xyz[0], target_person_xyz[1]),
+                        camera_position_xy=(pose["x"], pose["y"]),
+                        body_width_m=body_width_m,
+                    ):
+                        certain_indices.append(i)
+                    else:
+                        uncertain_indices.append(i)
+                uncertain_poses = [ring_samples[i] for i in uncertain_indices]
+                print(
+                    f"[SDG] {pos_tag} / {target_id} occupancy shortcut: {len(certain_indices)} certain, "
+                    f"{len(uncertain_indices)} uncertain -> rendering."
+                )
+
+                uncertain_total_counts: list[int] = []
+                uncertain_visible_counts: list[int] = []
+                pass1_elapsed = 0.0
+                pass2_elapsed = 0.0
+                look_at_xyz = (
+                    float(target_person_xyz[0]),
+                    float(target_person_xyz[1]),
+                    float(target_person_xyz[2]) + 1.0,
+                )
+
+                if uncertain_poses:
+                    print(
+                        f"[SDG] {pos_tag} / {target_id} Pass 1: hiding mesh, "
+                        f"{len(uncertain_poses)} unoccluded views..."
+                    )
+                    _begin_render_pass(scene_mesh_visible=False)
+                    pass1_start = time.perf_counter()
+                    for batch in iter_batches(uncertain_poses, num_cameras):
+                        set_batch_poses(driver_cams, batch, look_at_xyz)
+                        rep.orchestrator.step(rt_subframes=rt_subframes)
+                        batch_counts = read_semantic_counts(seg_annotators, target_semantic_label)
+                        uncertain_total_counts.extend(batch_counts[: len(batch)])
+                    pass1_elapsed = time.perf_counter() - pass1_start
+                    _end_render_pass()
+                    print(f"[SDG] {pos_tag} / {target_id} Pass 1 elapsed: {pass1_elapsed:.3f}s")
+
+                    print(
+                        f"[SDG] {pos_tag} / {target_id} Pass 2: capturing "
+                        f"{len(uncertain_poses)} occluded views..."
+                    )
+                    _begin_render_pass(scene_mesh_visible=True)
+                    pass2_start = time.perf_counter()
+                    for batch in iter_batches(uncertain_poses, num_cameras):
+                        set_batch_poses(driver_cams, batch, look_at_xyz)
+                        rep.orchestrator.step(rt_subframes=rt_subframes)
+                        batch_counts = read_semantic_counts(seg_annotators, target_semantic_label)
+                        uncertain_visible_counts.extend(batch_counts[: len(batch)])
+                    pass2_elapsed = time.perf_counter() - pass2_start
+                    _end_render_pass()
+                    print(f"[SDG] {pos_tag} / {target_id} Pass 2 elapsed: {pass2_elapsed:.3f}s")
+
+                score_field: list[ScoreFieldPoint] = []
+                for i in certain_indices:
+                    pose = ring_samples[i]
+                    score_field.append(
+                        ScoreFieldPoint(
+                            x=pose["x"], y=pose["y"], z=pose["z"],
+                            camera_z=pose["camera_z"], yaw_rad=pose["yaw_rad"],
+                            score=1.0, distance_m=pose["distance_m"],
+                            visible_person_pixels=1, total_person_pixels=1,
+                            scoring_mode="occupancy_full_visibility",
+                        )
+                    )
+
+                for idx_in_uncertain, i in enumerate(uncertain_indices):
+                    pose = ring_samples[i]
+                    vis = int(uncertain_visible_counts[idx_in_uncertain])
+                    total = int(uncertain_total_counts[idx_in_uncertain])
+                    score = float(vis) / float(total) if total > 0 else 0.0
+                    score_field.append(
+                        ScoreFieldPoint(
+                            x=pose["x"], y=pose["y"], z=pose["z"],
+                            camera_z=pose["camera_z"], yaw_rad=pose["yaw_rad"],
+                            score=score, distance_m=pose["distance_m"],
+                            visible_person_pixels=vis, total_person_pixels=total,
+                            scoring_mode="segmentation_visibility",
+                        )
+                    )
+
+                selected = select_capture_candidates(
                     score_field=score_field,
-                    depth_m=depth,
-                    ground_mask=ground_mask,
-                    camera_position=cam_pos,
-                    camera_orientation_wxyz=orient,
-                    resolution=resolution,
-                    focal_length=focal_length,
-                    horizontal_aperture=horizontal_aperture,
-                    vertical_aperture=vertical_aperture,
+                    score_min=capture_score_min,
+                    score_max=capture_score_max,
+                    seed=base_seed + pos_idx * 7919 + target_idx * 193,
+                    max_candidates=max_cap,
+                    fallback_to_nearest=False,
                 )
-                _save_score_map(score_map_arr, score_map_path)
-                _save_valid_mask(valid_mask_arr, valid_mask_path)
-                _save_yaw_map(yaw_map_arr, yaw_map_path)
-
-                bbox = _semantic_bbox_xyxy(seg_frame, "person")
-                _save_person_bbox_norm(
-                    person_bbox_path,
-                    bbox,
-                    image_width=int(resolution[0]),
-                    image_height=int(resolution[1]),
+                print(
+                    f"[SDG] {pos_tag} / {target_id} selected {len(selected)} / {len(score_field)} "
+                    "candidates for capture."
                 )
 
-                observations.append(
-                    {
-                        "idx": idx,
-                        "rgb_path": str(rgb_path),
-                        "depth_path": str(depth_png_path),
-                        "depth_npy_path": str(depth_npy_path),
-                        "ground_mask_path": str(ground_mask_path),
-                        "score_map_path": str(score_map_path),
-                        "valid_mask_path": str(valid_mask_path),
-                        "yaw_map_path": str(yaw_map_path),
-                        "person_bbox_path": str(person_bbox_path),
-                        "camera_position": [float(v) for v in cam_pos],
-                        "camera_orientation_wxyz": [float(v) for v in orient],
-                        "sampling_score": float(meta["sampling_score"]),
-                        "reid_score": float(meta["sampling_score"]),
-                        "visible_person_pixels": int(meta["visible_person_pixels"]),
-                        "total_person_pixels": int(meta["total_person_pixels"]),
-                        "scoring_mode": meta["scoring_mode"],
-                    }
+                overlay_path = save_score_field_overlay(
+                    occupancy_map=occupancy_map,
+                    score_field=score_field,
+                    out_path=target_dir / "score_field_overlay.png",
+                    person_position_xy=(float(target_person_xyz[0]), float(target_person_xyz[1])),
+                    selected_candidates=selected if selected else None,
                 )
-                scores_map[f"{stem}.png"] = float(meta["sampling_score"])
+                print(f"[SDG] {pos_tag} / {target_id} wrote overlay to {overlay_path}")
 
-            metadata = {
-                "scene_id": scene_id,
-                "stage_url": stage_url,
-                "pos_idx": pos_idx,
-                "person_position": [float(v) for v in person_xyz],
-                "person_prim_path": person_prim_path,
-                "img_size": [int(resolution[1]), int(resolution[0])],
-                "score_field_size": len(score_field),
-                "camera": {
-                    "camera_height": camera_z,
-                    "focal_length": focal_length,
-                    "horizontal_aperture": horizontal_aperture,
-                    "vertical_aperture": vertical_aperture,
-                    "resolution": [int(resolution[0]), int(resolution[1])],
-                },
-                "passA_elapsed_sec": float(passA_elapsed),
-                "passB_elapsed_sec": float(passB_elapsed),
-                "observations": observations,
-            }
-            (pos_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-            (pos_dir / "scores.json").write_text(json.dumps(scores_map, indent=2), encoding="utf-8")
-            print(f"[SDG] {pos_tag} wrote metadata.json + scores.json")
+                if not selected:
+                    print(f"[SDG] {pos_tag} / {target_id}: no candidates in score range; skipping capture.")
+                    continue
+
+                capture_batch_input: list[dict] = []
+                view_meta: list[dict] = []
+                for sf in selected:
+                    base_yaw = _camera_yaw_from_person((sf.x, sf.y), (target_person_xyz[0], target_person_xyz[1]))
+                    yaw_jitter = float(target_rng.uniform(-capture_yaw_delta_max, capture_yaw_delta_max))
+                    yaw = float(base_yaw + yaw_jitter)
+                    quat = _yaw_to_world_quaternion(yaw)
+                    capture_batch_input.append(
+                        {"x": float(sf.x), "y": float(sf.y), "camera_z": camera_z, "yaw_rad": float(yaw)}
+                    )
+                    view_meta.append(
+                        {
+                            "camera_position": (float(sf.x), float(sf.y), camera_z),
+                            "camera_orientation_wxyz": quat,
+                            "base_yaw_rad": float(base_yaw),
+                            "yaw_jitter_rad": float(yaw_jitter),
+                            "sampling_score": float(sf.score),
+                            "scoring_mode": str(sf.scoring_mode),
+                            "visible_person_pixels": int(sf.visible_person_pixels),
+                            "total_person_pixels": int(sf.total_person_pixels),
+                        }
+                    )
+
+                print(f"[SDG] {pos_tag} / {target_id} switching render quality to PathTracing + DLSS execMode=2")
+                _set_high_quality()
+
+                print(f"[SDG] {pos_tag} / {target_id} Capture Pass A: {len(capture_batch_input)} views...")
+                _begin_render_pass(scene_mesh_visible=False)
+                rgb_frames: list = [None] * len(capture_batch_input)
+                seg_frames: list = [None] * len(capture_batch_input)
+
+                passA_start = time.perf_counter()
+                view_idx = 0
+                for batch_idx, batch in enumerate(iter_batches(capture_batch_input, num_cameras)):
+                    set_batch_poses_with_orientation(driver_cams, batch)
+                    rep.orchestrator.step(rt_subframes=rt_subframes)
+                    for i in range(len(batch)):
+                        rgb_frames[view_idx + i] = np.asarray(rgb_annotators[i].get_data())
+                        seg_frames[view_idx + i] = seg_annotators[i].get_data()
+                    view_idx += len(batch)
+                    print(f"[SDG]   {target_id} Pass A batch {batch_idx}: {len(batch)} poses")
+                passA_elapsed = time.perf_counter() - passA_start
+                _end_render_pass()
+                print(f"[SDG] {pos_tag} / {target_id} Pass A elapsed: {passA_elapsed:.3f}s")
+
+                print(f"[SDG] {pos_tag} / {target_id} Capture Pass B: {len(capture_batch_input)} views...")
+                _begin_render_pass(scene_mesh_visible=True)
+                depth_frames: list = [None] * len(capture_batch_input)
+
+                passB_start = time.perf_counter()
+                view_idx = 0
+                for batch_idx, batch in enumerate(iter_batches(capture_batch_input, num_cameras)):
+                    set_batch_poses_with_orientation(driver_cams, batch)
+                    rep.orchestrator.step(rt_subframes=rt_subframes)
+                    for i in range(len(batch)):
+                        depth_frames[view_idx + i] = np.asarray(
+                            depth_annotators[i].get_data(), dtype=np.float32
+                        )
+                    view_idx += len(batch)
+                    print(f"[SDG]   {target_id} Pass B batch {batch_idx}: {len(batch)} poses")
+                passB_elapsed = time.perf_counter() - passB_start
+                _end_render_pass()
+                print(f"[SDG] {pos_tag} / {target_id} Pass B elapsed: {passB_elapsed:.3f}s")
+
+                observations: list[dict] = []
+                scores_map: dict[str, float] = {}
+                for idx, meta in enumerate(view_meta):
+                    cam_pos = meta["camera_position"]
+                    orient = meta["camera_orientation_wxyz"]
+                    rgb = rgb_frames[idx]
+                    depth = depth_frames[idx]
+                    seg_frame = seg_frames[idx]
+
+                    stem = f"{idx:03d}"
+                    rgb_path = target_dir / "rgb" / f"{stem}.png"
+                    depth_png_path = target_dir / "depth" / f"{stem}.png"
+                    depth_npy_path = target_dir / "depth" / f"{stem}.npy"
+                    ground_mask_path = target_dir / "ground_mask" / f"{stem}.png"
+                    score_map_path = target_dir / "score_map" / f"{stem}.npy"
+                    valid_mask_path = target_dir / "valid_mask" / f"{stem}.npy"
+                    yaw_map_path = target_dir / "yaw_map" / f"{stem}.npy"
+                    person_bbox_path = target_dir / "person_bbox" / f"{stem}.json"
+
+                    _save_rgb(rgb, rgb_path)
+                    _save_depth(depth, depth_png_path, depth_npy_path)
+
+                    ground_mask = _compute_ground_mask(
+                        depth_m=depth,
+                        camera_position=cam_pos,
+                        camera_orientation_wxyz=orient,
+                        resolution=resolution,
+                        focal_length=focal_length,
+                        horizontal_aperture=horizontal_aperture,
+                        vertical_aperture=vertical_aperture,
+                        occupancy_map=occupancy_map,
+                    )
+                    _save_ground_mask(ground_mask, ground_mask_path)
+
+                    score_map_arr, valid_mask_arr, yaw_map_arr = _compute_score_map(
+                        score_field=score_field,
+                        depth_m=depth,
+                        ground_mask=ground_mask,
+                        camera_position=cam_pos,
+                        camera_orientation_wxyz=orient,
+                        resolution=resolution,
+                        focal_length=focal_length,
+                        horizontal_aperture=horizontal_aperture,
+                        vertical_aperture=vertical_aperture,
+                    )
+                    _save_score_map(score_map_arr, score_map_path)
+                    _save_valid_mask(valid_mask_arr, valid_mask_path)
+                    _save_yaw_map(yaw_map_arr, yaw_map_path)
+
+                    bbox = _semantic_bbox_xyxy(seg_frame, target_semantic_label)
+                    _save_person_bbox_norm(
+                        person_bbox_path,
+                        bbox,
+                        image_width=int(resolution[0]),
+                        image_height=int(resolution[1]),
+                    )
+
+                    observations.append(
+                        {
+                            "idx": idx,
+                            "rgb_path": str(rgb_path),
+                            "depth_path": str(depth_png_path),
+                            "depth_npy_path": str(depth_npy_path),
+                            "ground_mask_path": str(ground_mask_path),
+                            "score_map_path": str(score_map_path),
+                            "valid_mask_path": str(valid_mask_path),
+                            "yaw_map_path": str(yaw_map_path),
+                            "person_bbox_path": str(person_bbox_path),
+                            "camera_position": [float(v) for v in cam_pos],
+                            "camera_orientation_wxyz": [float(v) for v in orient],
+                            "base_yaw_rad": float(meta["base_yaw_rad"]),
+                            "yaw_jitter_rad": float(meta["yaw_jitter_rad"]),
+                            "sampling_score": float(meta["sampling_score"]),
+                            "reid_score": float(meta["sampling_score"]),
+                            "visible_person_pixels": int(meta["visible_person_pixels"]),
+                            "total_person_pixels": int(meta["total_person_pixels"]),
+                            "scoring_mode": meta["scoring_mode"],
+                        }
+                    )
+                    scores_map[f"{stem}.png"] = float(meta["sampling_score"])
+
+                metadata = {
+                    "scene_id": scene_id,
+                    "stage_url": stage_url,
+                    "pos_idx": pos_idx,
+                    "target_instance_id": target_id,
+                    "target_semantic_label": target_semantic_label,
+                    "target_person_position": [float(v) for v in target_person_xyz],
+                    "context_person_position": (
+                        [float(v) for v in context_person_xyz] if context_person_xyz is not None else None
+                    ),
+                    "context_person_prim_path": context_person_prim_path if context_person_xyz is not None else None,
+                    "img_size": [int(resolution[1]), int(resolution[0])],
+                    "score_field_size": len(score_field),
+                    "camera": {
+                        "camera_height": camera_z,
+                        "focal_length": focal_length,
+                        "horizontal_aperture": horizontal_aperture,
+                        "vertical_aperture": vertical_aperture,
+                        "resolution": [int(resolution[0]), int(resolution[1])],
+                    },
+                    "passA_elapsed_sec": float(passA_elapsed),
+                    "passB_elapsed_sec": float(passB_elapsed),
+                    "observations": observations,
+                }
+                (target_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+                (target_dir / "scores.json").write_text(json.dumps(scores_map, indent=2), encoding="utf-8")
+                print(f"[SDG] {pos_tag} / {target_id} wrote metadata.json + scores.json")
 
             # 记录该 pos 的人物位置,供下一个 pos 保持最小距离
             existing_world_points_xy.append((float(person_xyz[0]), float(person_xyz[1])))

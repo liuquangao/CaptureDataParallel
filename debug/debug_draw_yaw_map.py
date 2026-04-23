@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 
 
-REPO_ROOT = Path("/home/leo/FusionLab/CaptureData")
-YAW_MAP_PATH = REPO_ROOT / "outputs/839873/pos_000/yaw_map/001.npy"
-IMAGE_PATH = REPO_ROOT / "outputs/839873/pos_000/rgb/001.png"
-OVERLAY_OUTPUT_PATH = REPO_ROOT / "outputs/839873/pos_000/rgb/001_debug_yaw_overlay.png"
-MAP_OUTPUT_PATH = REPO_ROOT / "outputs/839873/pos_000/rgb/001_debug_yaw_map.png"
+REPO_ROOT = Path("/home/leo/FusionLab/CaptureDataParallel")
+YAW_MAP_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/yaw_map/002.npy"
+IMAGE_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/rgb/002.png"
+OVERLAY_OUTPUT_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/rgb/002_debug_yaw_overlay.png"
+MAP_OUTPUT_PATH = REPO_ROOT / "outputs_parallel/839873/pos_000/person_000/rgb/002_debug_yaw_map.png"
 ARROW_LENGTH = 20
 RING_RADIUS = 12
 

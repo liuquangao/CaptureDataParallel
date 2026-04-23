@@ -7,8 +7,6 @@ launch_config:
   disable_viewport_updates: true
   anti_aliasing: 1
 
-
-
 rt_subframes: 4   # orchestrator.step 的 rt_subframes
 num_cameras: 16   # 每批并行的相机数
 
@@ -20,6 +18,7 @@ close_app_after_run: true
 # ---------------------------------------------------------------------------
 person:
   url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
+  secondary_url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/original_male_adult_medical_01/male_adult_medical_01.usd
 
 # ---------------------------------------------------------------------------
 # Dataset (阶段 4 多 scene 循环用)
@@ -32,39 +31,65 @@ dataset:
     # 1. single: collect one specified scene_id (or a short explicit list)
     # 2. random: randomly sample random_count scene ids
     # 3. all: collect every supported .usda scene
-    mode: random
+    mode: all
     random_count: 640
     random_seed: 2026
+    exclude_scene_ids:
+      - "839929"
 
 # Number of person placements collected per scene
 num_positions: 4
+
+position_sampling:
+  metric: room_free_area_m2
+  default_num_positions: 6
+  area_to_num_positions:
+    - max_area_m2: 25
+      num_positions: 1
+    - max_area_m2: 50
+      num_positions: 2
+    - max_area_m2: 80
+      num_positions: 3
+    - max_area_m2: 120
+      num_positions: 4
+    - max_area_m2: 180
+      num_positions: 5
 
 scene_filter:
   # Skip scenes whose occupancy map is mostly free space (usually means the
   # map is not closed / unbounded, e.g. 0432_839899). Ratio = free_cells /
   # total_grid_cells. Typical closed indoor scenes sit around 0.3-0.6.
   max_free_ratio: 0.75
+  # Also drop tiny usable rooms such as 0976_841915.
+  min_room_free_area_m2: 15.0
 
 sampling:
   # Reproducibility seed for per-scene position / candidate sampling
   seed: 2026
-
   # Different pos_{xxx} in the same scene must be at least this far apart
   min_position_distance_m: 3.0
-
   # Character spawn point must keep this clearance from obstacles
   character_min_obstacle_distance_m: 0.2
-
   # If placement/scoring fails for a given pos_{xxx}, retry with a fresh seed
   # up to this many times before giving up on that position.
   max_attempts_per_position: 2
 
+pair_sampling:
+  enabled: true
+  min_pair_distance_m: 1.5
+  max_pair_distance_m: 3.5
+  second_person_min_obstacle_distance_m: 0.2
+  require_pair_connectivity: true
+  max_second_person_attempts: 12
+  max_pair_layout_attempts: 6
+  min_joint_candidate_count: 8
+
 score_field:
   min_radius_m: 1.2
   max_radius_m: 4.5
-  grid_step_m: 0.10
+  grid_step_m: 0.15
   # Camera candidates in the score field must keep this clearance from obstacles
-  camera_min_obstacle_distance_m: 0.2
+  camera_min_obstacle_distance_m: 0.1
   # Occupancy-based shortcut: if the full body width is cleanly visible,
   # directly mark score=1.0 without segmentation scoring
   occupancy_full_visibility_width_m: 0.25
@@ -89,10 +114,12 @@ scene:
 # Camera (单一相机池,同时用于 score_field 打分 + 最终 RGB/Depth 捕获)
 # ---------------------------------------------------------------------------
 camera:
-  resolution: [640, 480]
+  resolution: [896, 672]
   camera_height: 0.4
   focus_distance: 400.0
   focal_length: 8
   near_clipping_distance: 0.01
+  capture_yaw_jitter_margin: 0.1
 backend_params:
   output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_parallel
+  skip_existing_scene_dirs: true
