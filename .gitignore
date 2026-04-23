@@ -25,3 +25,6 @@ outputs_parallel/
 *.log
 *.tmp
 *.temp
+
+AGENTS.md
+CLAUDE.md
