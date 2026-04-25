@@ -1,0 +1,95 @@
+# AHO active inference evaluation.
+# Runs one-person before -> AHO score-map -> direct pixel backprojection -> after evaluation.
+
+launch_config:
+  renderer: RealTimePathTracing
+  headless: true
+  disable_viewport_updates: true
+  anti_aliasing: 1
+
+rt_subframes: 4
+num_cameras: 16
+clear_previous_semantics: true
+close_app_after_run: true
+
+eval:
+  max_scenes: 4
+
+dataset:
+  stage_root: /home/leo/FusionLab/DataSets/spatialverse/SAGE-3D_InteriorGS_usda
+  interiorgs_root: /home/leo/FusionLab/DataSets/spatialverse/InteriorGS
+  selection:
+    mode: all
+    exclude_scene_ids:
+      - "839929"
+    exclude_existing_output_roots:
+      - /home/leo/FusionLab/CaptureDataParallel/outputs_parallel
+
+person:
+  url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
+
+scene:
+  occupancy_flip_x: true
+  occupancy_flip_y: true
+  occupancy_negate_xy: true
+  warmup_updates: 10
+  character_arm_drop_degrees: 75.0
+
+scene_filter:
+  max_free_ratio: 0.75
+  min_room_free_area_m2: 15.0
+
+position_sampling:
+  metric: room_free_area_m2
+  default_num_positions: 6
+  area_to_num_positions:
+    - max_area_m2: 25
+      num_positions: 1
+    - max_area_m2: 50
+      num_positions: 2
+    - max_area_m2: 80
+      num_positions: 3
+    - max_area_m2: 120
+      num_positions: 4
+    - max_area_m2: 180
+      num_positions: 5
+
+sampling:
+  seed: 2026
+  min_position_distance_m: 3.0
+  character_min_obstacle_distance_m: 0.2
+  max_attempts_per_position: 8
+
+score_field:
+  min_radius_m: 1.2
+  max_radius_m: 4.5
+  grid_step_m: 0.15
+  camera_min_obstacle_distance_m: 0.1
+  occupancy_full_visibility_width_m: 0.25
+  capture_score_min: 0.20
+  capture_score_max: 0.65
+  max_capture_candidates: 16
+
+camera:
+  resolution: [896, 672]
+  camera_height: 0.4
+  focus_distance: 400.0
+  focal_length: 8
+  near_clipping_distance: 0.01
+  capture_yaw_jitter_margin: 0.1
+
+backend_params:
+  output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_aho_active_eval
+
+aho_inference:
+  project_root: /home/leo/FusionLab/ActiveHumanObservation
+  checkpoint: /home/leo/FusionLab/ActiveHumanObservation/outputs/exp_20260424_234320_scoremap/final_model/model.safetensors
+  pretrained_dformer: /home/leo/FusionLab/ActiveHumanObservation/checkpoints/pretrained/dformer/DFormerv2_Large_pretrained.pth
+  backbone_variant: large
+  image_width: 384
+  image_height: 288
+  flow_hidden: 32
+  v_dim: 256
+  roi_size: 7
+  roi_level: 2
+  device: auto
