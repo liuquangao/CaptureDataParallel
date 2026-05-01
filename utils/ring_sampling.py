@@ -162,6 +162,59 @@ def iter_ring_camera_samples(
         }
 
 
+def iter_shared_pair_camera_samples(
+    occupancy_map,
+    pair_center_xy: tuple[float, float],
+    target_positions_xy: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    camera_height_m: float,
+    min_radius_m: float,
+    max_radius_m: float,
+    grid_step_m: float,
+    min_obstacle_distance_m: float = 0.0,
+    min_distance_to_any_person_m: float = 0.0,
+):
+    """Enumerate shared camera positions around a pair center.
+
+    The returned candidate positions are target-agnostic. Callers should assign
+    target-specific yaw values when building each target person's score field.
+    """
+    center_x, center_y = pair_center_xy
+    visited_cells: set[tuple[int, int]] = set()
+
+    for x, y, distance_m in _iter_annulus_xy(center_x, center_y, min_radius_m, max_radius_m, grid_step_m):
+        row, col = occupancy_map.world_to_grid(x, y)
+        if not (0 <= row < occupancy_map.height and 0 <= col < occupancy_map.width):
+            continue
+        if not bool(occupancy_map.free_mask[row, col]):
+            continue
+        if occupancy_map.room_free_mask is not None and not bool(occupancy_map.room_free_mask[row, col]):
+            continue
+        if not occupancy_map._is_cell_clear_of_obstacles(int(row), int(col), float(min_obstacle_distance_m)):
+            continue
+        if (row, col) in visited_cells:
+            continue
+
+        too_close = False
+        for person_x, person_y in target_positions_xy:
+            dx = float(x) - float(person_x)
+            dy = float(y) - float(person_y)
+            if (dx * dx + dy * dy) ** 0.5 < float(min_distance_to_any_person_m):
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        visited_cells.add((row, col))
+        yield {
+            "x": float(x),
+            "y": float(y),
+            "z": 0.0,
+            "camera_z": float(camera_height_m),
+            "yaw_rad": atan2(float(center_y) - float(y), float(center_x) - float(x)),
+            "distance_m": float(distance_m),
+        }
+
+
 def select_capture_candidates(
     score_field: list[ScoreFieldPoint],
     score_min: float,

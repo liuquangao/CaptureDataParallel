@@ -20,6 +20,7 @@ env/
 
 # Generated outputs
 outputs_aho_active_eval/
+outputs_parallel-v2/
 outputs_parallel/
 
 # Local logs / temp files

@@ -31,7 +31,9 @@ dataset:
     # 1. single: collect one specified scene_id (or a short explicit list)
     # 2. random: randomly sample random_count scene ids
     # 3. all: collect every supported .usda scene
-    mode: all
+    mode: single
+    scene_ids:
+      - "839874"
     random_count: 640
     random_seed: 2026
     exclude_scene_ids:
@@ -76,10 +78,10 @@ sampling:
 
 pair_sampling:
   enabled: true
-  min_pair_distance_m: 1.5
-  max_pair_distance_m: 3.5
+  min_pair_distance_m: 1.0
+  max_pair_distance_m: 2.0
   second_person_min_obstacle_distance_m: 0.2
-  require_pair_connectivity: true
+  require_pair_connectivity: false
   max_second_person_attempts: 12
   max_pair_layout_attempts: 6
   min_joint_candidate_count: 8
@@ -90,6 +92,9 @@ score_field:
   grid_step_m: 0.15
   # Camera candidates in the score field must keep this clearance from obstacles
   camera_min_obstacle_distance_m: 0.1
+  # Shared pair-centered score-field candidates must keep this distance from
+  # every person. Nearby cells are invalid rather than low-score labels.
+  min_camera_distance_to_any_person_m: 1.2
   # Occupancy-based shortcut: if the full body width is cleanly visible,
   # directly mark score=1.0 without segmentation scoring
   occupancy_full_visibility_width_m: 0.25
@@ -121,5 +126,5 @@ camera:
   near_clipping_distance: 0.01
   capture_yaw_jitter_margin: 0.1
 backend_params:
-  output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_parallel
+  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_parallel-v2
   skip_existing_scene_dirs: true
