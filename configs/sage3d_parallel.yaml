@@ -31,10 +31,10 @@ dataset:
     # 1. single: collect one specified scene_id (or a short explicit list)
     # 2. random: randomly sample random_count scene ids
     # 3. all: collect every supported .usda scene
-    mode: single
+    mode: all
     scene_ids:
       - "839874"
-    random_count: 640
+    random_count: 8
     random_seed: 2026
     exclude_scene_ids:
       - "839929"
@@ -77,32 +77,35 @@ sampling:
   max_attempts_per_position: 2
 
 pair_sampling:
-  enabled: true
   min_pair_distance_m: 1.0
-  max_pair_distance_m: 2.0
+  max_pair_distance_m: 3.0
   second_person_min_obstacle_distance_m: 0.2
   require_pair_connectivity: false
-  max_second_person_attempts: 12
   max_pair_layout_attempts: 6
-  min_joint_candidate_count: 8
 
 score_field:
-  min_radius_m: 1.2
+  min_radius_m: 0.3
   max_radius_m: 4.5
-  grid_step_m: 0.15
+  grid_step_m: 0.2
   # Camera candidates in the score field must keep this clearance from obstacles
   camera_min_obstacle_distance_m: 0.1
   # Shared pair-centered score-field candidates must keep this distance from
   # every person. Nearby cells are invalid rather than low-score labels.
-  min_camera_distance_to_any_person_m: 1.2
-  # Occupancy-based shortcut: if the full body width is cleanly visible,
-  # directly mark score=1.0 without segmentation scoring
-  occupancy_full_visibility_width_m: 0.25
+  min_camera_distance_to_any_person_m: 0.3
   # Final render views are sampled only from this score range
   capture_score_min: 0.20
-  capture_score_max: 0.65
+  capture_score_max: 1.00
   # Number of final rendered observations per pos_{xxx}
   max_capture_candidates: 16
+
+score_field_views:
+  # Save every target-facing score-field candidate view for offline ReID scoring.
+  # This does not affect raycast scoring or final shared capture selection.
+  enabled: true
+  save_rgb: true
+  save_depth: false
+  save_bbox: true
+  save_metadata: true
 
 
 # ---------------------------------------------------------------------------
@@ -119,12 +122,12 @@ scene:
 # Camera (单一相机池,同时用于 score_field 打分 + 最终 RGB/Depth 捕获)
 # ---------------------------------------------------------------------------
 camera:
-  resolution: [896, 672]
+  # resolution: [640, 480]
+  resolution: [256, 256]
   camera_height: 0.4
   focus_distance: 400.0
   focal_length: 8
   near_clipping_distance: 0.01
-  capture_yaw_jitter_margin: 0.1
 backend_params:
-  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_parallel-v2
-  skip_existing_scene_dirs: true
+  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_parallel-v2-raycasted
+  skip_existing_scene_dirs: false

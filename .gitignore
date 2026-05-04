@@ -22,6 +22,7 @@ env/
 outputs_aho_active_eval/
 outputs_parallel-v2/
 outputs_parallel/
+outputs_parallel-v2-raycasted/
 
 # Local logs / temp files
 *.log

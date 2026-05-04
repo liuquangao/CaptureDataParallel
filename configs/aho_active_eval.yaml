@@ -79,15 +79,15 @@ camera:
   capture_yaw_jitter_margin: 0.1
 
 backend_params:
-  output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_aho_active_eval
+  output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_aho_active_eval_habitat_train
 
 aho_inference:
   project_root: /home/leo/FusionLab/ActiveHumanObservation
-  checkpoint: /home/leo/FusionLab/ActiveHumanObservation/outputs/exp_20260424_234320_scoremap/final_model/model.safetensors
+  checkpoint: /home/leo/FusionLab/ActivateReID/outputs/exp_20260504_154600_scoremap/final_model/model.safetensors
   pretrained_dformer: /home/leo/FusionLab/ActiveHumanObservation/checkpoints/pretrained/dformer/DFormerv2_Large_pretrained.pth
   backbone_variant: large
-  image_width: 384
-  image_height: 288
+  image_width: 256
+  image_height: 256
   flow_hidden: 32
   v_dim: 256
   roi_size: 7
