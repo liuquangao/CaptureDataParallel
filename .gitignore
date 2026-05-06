@@ -21,6 +21,7 @@ env/
 # Generated outputs
 outputs_aho_active_eval/
 outputs_parallel-v2/
+outputs_parallel-v2-raycasted/
 outputs_parallel/
 outputs_parallel-v2-raycasted/
 

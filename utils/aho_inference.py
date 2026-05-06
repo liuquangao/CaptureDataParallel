@@ -69,31 +69,34 @@ def _load_checkpoint(path: Path, torch, device) -> dict:
     return torch.load(str(path), map_location=device)
 
 
-def _load_active_human_observation_class(aho_root: Path):
-    aho_pkg_path = aho_root / "aho"
-    models_pkg_path = aho_pkg_path / "models"
+def _load_model_class(project_root: Path, pkg_name: str, module_name: str, class_name: str):
+    pkg_path = project_root / pkg_name
+    models_pkg_path = pkg_path / "models"
+    full_pkg = pkg_name
+    full_models_pkg = f"{pkg_name}.models"
+    full_module = f"{pkg_name}.models.{module_name}"
 
-    if "aho" not in sys.modules:
-        aho_pkg = types.ModuleType("aho")
-        aho_pkg.__path__ = [str(aho_pkg_path)]
-        sys.modules["aho"] = aho_pkg
+    if full_pkg not in sys.modules:
+        pkg = types.ModuleType(full_pkg)
+        pkg.__path__ = [str(pkg_path)]
+        sys.modules[full_pkg] = pkg
 
-    if "aho.models" not in sys.modules:
-        models_pkg = types.ModuleType("aho.models")
+    if full_models_pkg not in sys.modules:
+        models_pkg = types.ModuleType(full_models_pkg)
         models_pkg.__path__ = [str(models_pkg_path)]
-        sys.modules["aho.models"] = models_pkg
+        sys.modules[full_models_pkg] = models_pkg
 
-    module_name = "aho.models.aho_model"
-    if module_name in sys.modules:
-        return sys.modules[module_name].ActiveHumanObservation
+    if full_module in sys.modules:
+        return getattr(sys.modules[full_module], class_name)
 
-    spec = importlib.util.spec_from_file_location(module_name, models_pkg_path / "aho_model.py")
+    module_file = models_pkg_path / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(full_module, module_file)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Failed to load AHO model module from {models_pkg_path / 'aho_model.py'}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module.ActiveHumanObservation
+        raise ImportError(f"Failed to load model module from {module_file}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[full_module] = mod
+    spec.loader.exec_module(mod)
+    return getattr(mod, class_name)
 
 
 class AHOInferenceRunner:
@@ -104,7 +107,10 @@ class AHOInferenceRunner:
         if str(aho_root) not in sys.path:
             sys.path.insert(0, str(aho_root))
 
-        ActiveHumanObservation = _load_active_human_observation_class(aho_root)
+        pkg_name   = str(config.get("model_pkg",    "aho"))
+        module_name = str(config.get("model_module", "aho_model"))
+        class_name  = str(config.get("model_class",  "ActiveHumanObservation"))
+        ActiveHumanObservation = _load_model_class(aho_root, pkg_name, module_name, class_name)
 
         device_name = str(config.get("device", "auto"))
         if device_name == "auto":
@@ -168,7 +174,7 @@ class AHOInferenceRunner:
         depth_norm = (depth_norm - 0.48) / 0.28
         image = Image.fromarray(depth_norm, mode="F")
         image = image.resize((self.image_width, self.image_height), _BILINEAR)
-        resized = np.asarray(image, dtype=np.float32)
+        resized = np.asarray(image, dtype=np.float32).copy()
         return self.torch.from_numpy(resized).unsqueeze(0).unsqueeze(0).to(self.device)
 
     def predict(self, rgb: np.ndarray, depth_m: np.ndarray, bbox_norm: list[float] | tuple[float, ...]) -> dict:

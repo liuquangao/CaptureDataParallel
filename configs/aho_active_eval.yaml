@@ -71,7 +71,7 @@ score_field:
   max_capture_candidates: 16
 
 camera:
-  resolution: [896, 672]
+  resolution: [256, 256]
   camera_height: 0.4
   focus_distance: 400.0
   focal_length: 8
@@ -79,12 +79,15 @@ camera:
   capture_yaw_jitter_margin: 0.1
 
 backend_params:
-  output_dir: /home/leo/FusionLab/CaptureDataParallel/outputs_aho_active_eval_habitat_train
+  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_aho_active_eval_habitat_train
 
 aho_inference:
-  project_root: /home/leo/FusionLab/ActiveHumanObservation
+  project_root: /home/leo/FusionLab/ActivateReID
+  model_pkg: active_reid
+  model_module: activate_reid_model
+  model_class: ActivateReID
   checkpoint: /home/leo/FusionLab/ActivateReID/outputs/exp_20260504_154600_scoremap/final_model/model.safetensors
-  pretrained_dformer: /home/leo/FusionLab/ActiveHumanObservation/checkpoints/pretrained/dformer/DFormerv2_Large_pretrained.pth
+  pretrained_dformer: /home/leo/FusionLab/ActivateReID/checkpoints/pretrained/dformer/DFormerv2_Large_pretrained.pth
   backbone_variant: large
   image_width: 256
   image_height: 256
