@@ -23,7 +23,9 @@ class ScoreFieldPoint:
     yaw_rad: float
     score: float
     distance_m: float
-    scoring_mode: str = "raycast_skeleton_joint_visibility"
+    visible_person_pixels: int = 0
+    total_person_pixels: int = 0
+    scoring_mode: str = "segmentation_visibility"
     candidate_id: int | None = None
 
 

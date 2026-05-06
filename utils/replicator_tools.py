@@ -139,6 +139,20 @@ def teardown_camera_pool(
             stage.RemovePrim(scope_path)
 
 
+def set_batch_poses(driver_cams, batch: list[dict], look_at_xyz: tuple) -> None:
+    """将相机放在 batch[i] 的 (x, y, camera_z) 处，朝向固定的 look_at_xyz 点。"""
+    import omni.replicator.core as rep
+
+    lx, ly, lz = float(look_at_xyz[0]), float(look_at_xyz[1]), float(look_at_xyz[2])
+    for cam, pose in zip(driver_cams[: len(batch)], batch):
+        rep.functional.modify.pose(
+            cam,
+            position_value=(float(pose["x"]), float(pose["y"]), float(pose["camera_z"])),
+            look_at_value=(lx, ly, lz),
+            look_at_up_axis=(0, 0, 1),
+        )
+
+
 def set_batch_poses_with_orientation(driver_cams, batch: list[dict]) -> None:
     """显式 yaw→quaternion 方式设置位姿。``batch[i]`` 需含 ``x,y,camera_z,yaw_rad``。"""
     import omni.replicator.core as rep

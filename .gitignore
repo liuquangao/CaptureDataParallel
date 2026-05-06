@@ -20,10 +20,11 @@ env/
 
 # Generated outputs
 outputs_aho_active_eval/
+outputs_aho_active_eval_habitat_train/
 outputs_parallel-v2/
 outputs_parallel-v2-raycasted/
 outputs_parallel/
-outputs_parallel-v2-raycasted/
+outputs_aho_active_eval_isaac_two_people/
 
 # Local logs / temp files
 *.log

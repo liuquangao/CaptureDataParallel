@@ -27,6 +27,13 @@ dataset:
 
 person:
   url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
+  secondary_url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/original_male_adult_medical_01/male_adult_medical_01.usd
+pair_sampling:
+  min_pair_distance_m: 1.5
+  max_pair_distance_m: 3.5
+  second_person_min_obstacle_distance_m: 0.2
+  require_pair_connectivity: true
+  max_pair_layout_attempts: 6
 
 scene:
   occupancy_flip_x: true
@@ -79,14 +86,14 @@ camera:
   capture_yaw_jitter_margin: 0.1
 
 backend_params:
-  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_aho_active_eval_habitat_train
+  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_aho_active_eval_isaac_two_people
 
 aho_inference:
   project_root: /home/leo/FusionLab/ActivateReID
   model_pkg: active_reid
   model_module: activate_reid_model
   model_class: ActivateReID
-  checkpoint: /home/leo/FusionLab/ActivateReID/outputs/exp_20260504_154600_scoremap/final_model/model.safetensors
+  checkpoint: /home/leo/FusionLab/ActivateReID/outputs/exp_20260505_111310_scoremap/final_model/model.safetensors
   pretrained_dformer: /home/leo/FusionLab/ActivateReID/checkpoints/pretrained/dformer/DFormerv2_Large_pretrained.pth
   backbone_variant: large
   image_width: 256
