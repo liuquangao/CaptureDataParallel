@@ -19,8 +19,12 @@ dataset:
   stage_root: /home/leo/FusionLab/DataSets/spatialverse/SAGE-3D_InteriorGS_usda
   interiorgs_root: /home/leo/FusionLab/DataSets/spatialverse/InteriorGS
   selection:
-    mode: file
-    scene_list_path: /home/leo/FusionLab/AHO/CaptureDataParallel/configs/scene_list_test.txt
+    mode: all
+    exclude_scene_ids:
+      - "839929"
+    exclude_existing_output_roots:
+      - /home/leo/FusionLab/CaptureDataParallel/outputs_parallel
+      - /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_aho_active_eval_visibility_only
 
 person:
   url: https://omniverse-content-staging.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/People/Characters/F_Business_02/F_Business_02.usd
@@ -57,14 +61,6 @@ position_sampling:
       num_positions: 4
     - max_area_m2: 180
       num_positions: 5
-    - max_area_m2: 260
-      num_positions: 6
-    - max_area_m2: 360
-      num_positions: 7
-    - max_area_m2: 480
-      num_positions: 8
-    - max_area_m2: 620
-      num_positions: 9
 
 sampling:
   seed: 2026
@@ -91,14 +87,14 @@ camera:
   capture_yaw_jitter_margin: 0.1
 
 backend_params:
-  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_aho_active_eval
+  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_aho_active_eval_visibility_only
 
 aho_inference:
   project_root: /home/leo/FusionLab/ActivateReID
   model_pkg: active_reid
   model_module: activate_reid_model
   model_class: ActivateReID
-  checkpoint: /home/leo/FusionLab/ActivateReID/outputs/exp_20260511_154541_scoremap_avg/final_model/model.safetensors
+  checkpoint: /home/leo/FusionLab/ActivateReID/outputs/exp_20260508_174849_scoremap_visibility/final_model/model.safetensors
   pretrained_dformer: /home/leo/FusionLab/ActivateReID/checkpoints/pretrained/dformer/DFormerv2_Large_pretrained.pth
   backbone_variant: large
   image_width: 256

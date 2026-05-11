@@ -25,6 +25,7 @@ outputs_parallel-v2/
 outputs_parallel-v2-raycasted/
 outputs_parallel/
 outputs_aho_active_eval_isaac_two_people/
+outputs_aho_active_eval_visibility_only/
 
 # Local logs / temp files
 *.log

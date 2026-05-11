@@ -31,7 +31,9 @@ dataset:
     # 1. single: collect one specified scene_id (or a short explicit list)
     # 2. random: randomly sample random_count scene ids
     # 3. all: collect every supported .usda scene
-    mode: all
+    # 4. file: read scene ids from a text file (one id per line)
+    mode: file
+    scene_list_path: configs/scene_list_train.txt
     scene_ids:
       - "839874"
     random_count: 8
@@ -92,6 +94,8 @@ score_field:
   # Shared pair-centered score-field candidates must keep this distance from
   # every person. Nearby cells are invalid rather than low-score labels.
   min_camera_distance_to_any_person_m: 0.3
+  # Body width used by occupancy shortcut to classify "certainly fully visible" poses
+  occupancy_full_visibility_width_m: 0.25
   # Final render views are sampled only from this score range
   capture_score_min: 0.20
   capture_score_max: 1.00
@@ -129,5 +133,5 @@ camera:
   focal_length: 8
   near_clipping_distance: 0.01
 backend_params:
-  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_parallel-v2-raycasted
+  output_dir: /home/leo/FusionLab/AHO/CaptureDataParallel/outputs_parallel-v2
   skip_existing_scene_dirs: false

@@ -68,7 +68,14 @@ def resolve_scene_configs(cfg: dict) -> list[dict]:
             f"No scenes under {stage_root} have matching InteriorGS occupancy under {interiorgs_root}"
         )
 
-    if mode == "single":
+    if mode == "file":
+        scene_list_path = Path(str(selection_cfg["scene_list_path"]))
+        if not scene_list_path.is_absolute():
+            scene_list_path = Path.cwd() / scene_list_path
+        if not scene_list_path.exists():
+            raise FileNotFoundError(f"dataset.selection.scene_list_path does not exist: {scene_list_path}")
+        scene_ids = [line.strip() for line in scene_list_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    elif mode == "single":
         explicit_ids = selection_cfg.get("scene_ids")
         if explicit_ids:
             scene_ids = [str(sid) for sid in explicit_ids]

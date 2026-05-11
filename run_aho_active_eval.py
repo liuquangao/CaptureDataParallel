@@ -26,7 +26,7 @@ if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
 
-from utils.config_io import load_config
+from utils.config_io import apply_overrides, load_config
 from utils.occupancy_map import load_interiorgs_occupancy_map
 from utils.scene_selection import check_scene_filter, resolve_scene_configs
 
@@ -38,6 +38,9 @@ _BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AHO active inference evaluator (two-person)")
     parser.add_argument("--config", type=str, default="configs/aho_active_eval.yaml")
+    parser.add_argument("--set", dest="overrides", action="append", default=[],
+                        metavar="KEY=VALUE",
+                        help="Override config values, e.g. --set aho_inference.checkpoint=/path/to/model.safetensors")
     return parser.parse_args()
 
 
@@ -235,7 +238,7 @@ def _filter_existing_scene_outputs(scene_configs: list[dict], output_roots: list
 
 def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    config = apply_overrides(load_config(args.config), args.overrides)
 
     from isaacsim import SimulationApp
 
@@ -339,6 +342,8 @@ def main() -> None:
     scenes_skipped_filter = 0
     scenes_skipped_no_candidates = 0
     scenes_failed = 0
+
+    all_summaries: list[dict] = []
 
     for scene_cfg in scene_configs:
         if scenes_done >= max_scenes:
@@ -789,6 +794,7 @@ def main() -> None:
                             "aho_prediction": aho_prediction,
                             "after_pose": after_pose,
                             "after_score": None,
+                            "after_bbox_norm": None,
                         }
 
                     (view_dir / "record.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
@@ -800,6 +806,7 @@ def main() -> None:
                     after_poses_flat = [req[2] for req in after_requests]
 
                     _begin_render_pass(scene_mesh_visible=False)
+                    after_rgb_flat = [None] * len(after_poses_flat)
                     after_seg_hidden_flat = [None] * len(after_poses_flat)
                     after_total_flat = {t["semantic_label"]: [] for t in targets}
                     view_idx = 0
@@ -811,12 +818,12 @@ def main() -> None:
                                 read_semantic_counts(seg_annotators, t["semantic_label"])[: len(batch)]
                             )
                         for i in range(len(batch)):
+                            after_rgb_flat[view_idx + i] = np.asarray(rgb_annotators[i].get_data())
                             after_seg_hidden_flat[view_idx + i] = seg_annotators[i].get_data()
                         view_idx += len(batch)
                     _end_render_pass()
 
                     _begin_render_pass(scene_mesh_visible=True)
-                    after_rgb_flat = [None] * len(after_poses_flat)
                     after_depth_flat = [None] * len(after_poses_flat)
                     after_visible_flat = {t["semantic_label"]: [] for t in targets}
                     view_idx = 0
@@ -828,7 +835,6 @@ def main() -> None:
                                 read_semantic_counts(seg_annotators, t["semantic_label"])[: len(batch)]
                             )
                         for i in range(len(batch)):
-                            after_rgb_flat[view_idx + i] = np.asarray(rgb_annotators[i].get_data())
                             after_depth_flat[view_idx + i] = np.asarray(depth_annotators[i].get_data(), dtype=np.float32)
                         view_idx += len(batch)
                     _end_render_pass()
@@ -842,7 +848,15 @@ def main() -> None:
                         after_dir.mkdir(parents=True, exist_ok=True)
                         _save_rgb(after_rgb_flat[after_idx], after_dir / "rgb.png")
                         _save_depth(after_depth_flat[after_idx], after_dir / "depth.png", after_dir / "depth.npy")
+                        after_bbox = _semantic_bbox_xyxy(after_seg_hidden_flat[after_idx], lbl)
+                        after_bbox_norm = _save_bbox_json(
+                            after_dir / f"bbox_{lbl}.json",
+                            after_bbox,
+                            image_width=int(resolution[0]),
+                            image_height=int(resolution[1]),
+                        )
                         records[view_i]["targets"][lbl]["after_score"] = float(after_score)
+                        records[view_i]["targets"][lbl]["after_bbox_norm"] = after_bbox_norm
 
                     # 更新 record.json
                     for record in records:
@@ -899,6 +913,7 @@ def main() -> None:
                         f"delta={st['mean_delta']:.4f} success={st['success_rate']:.3f}"
                     )
 
+                all_summaries.append(summary)
                 existing_world_points_xy.append((float(person_xyz[0]), float(person_xyz[1])))
                 scenes_done += 1
 
@@ -920,6 +935,83 @@ def main() -> None:
         f"skipped_no_candidates={scenes_skipped_no_candidates}, "
         f"failed={scenes_failed}"
     )
+
+    # --- 全局指标汇总 ---
+    if all_summaries:
+        target_labels = list(all_summaries[0]["target_stats"].keys())
+        per_scene: dict[str, dict] = {}
+        global_by_target: dict[str, dict] = {lbl: {"before": [], "after": [], "delta": []} for lbl in target_labels}
+
+        for s in all_summaries:
+            sid = s["scene_id"]
+            if sid not in per_scene:
+                per_scene[sid] = {lbl: {"before": [], "after": [], "delta": []} for lbl in target_labels}
+            for lbl in target_labels:
+                st = s["target_stats"].get(lbl, {})
+                if st.get("num_after", 0) > 0:
+                    per_scene[sid][lbl]["before"].append(st["mean_before"])
+                    per_scene[sid][lbl]["after"].append(st["mean_after"])
+                    per_scene[sid][lbl]["delta"].append(st["mean_delta"])
+                    global_by_target[lbl]["before"].append(st["mean_before"])
+                    global_by_target[lbl]["after"].append(st["mean_after"])
+                    global_by_target[lbl]["delta"].append(st["mean_delta"])
+
+        def _agg(vals: list[float]) -> dict:
+            if not vals:
+                return {"mean": None, "std": None, "n": 0}
+            arr = np.array(vals, dtype=np.float64)
+            return {"mean": float(arr.mean()), "std": float(arr.std()), "n": len(vals)}
+
+        per_scene_agg = {}
+        for sid, tgt_data in per_scene.items():
+            per_scene_agg[sid] = {
+                lbl: {
+                    "before": _agg(tgt_data[lbl]["before"]),
+                    "after": _agg(tgt_data[lbl]["after"]),
+                    "delta": _agg(tgt_data[lbl]["delta"]),
+                    "success_rate": (
+                        float(np.mean([d > 0.0 for d in tgt_data[lbl]["delta"]]))
+                        if tgt_data[lbl]["delta"] else None
+                    ),
+                }
+                for lbl in target_labels
+            }
+
+        global_agg = {
+            lbl: {
+                "before": _agg(global_by_target[lbl]["before"]),
+                "after": _agg(global_by_target[lbl]["after"]),
+                "delta": _agg(global_by_target[lbl]["delta"]),
+                "success_rate": (
+                    float(np.mean([d > 0.0 for d in global_by_target[lbl]["delta"]]))
+                    if global_by_target[lbl]["delta"] else None
+                ),
+            }
+            for lbl in target_labels
+        }
+
+        all_deltas_global = [d for lbl in target_labels for d in global_by_target[lbl]["delta"]]
+        metrics_summary = {
+            "run_info": {
+                "scenes_done": scenes_done,
+                "scenes_skipped_filter": scenes_skipped_filter,
+                "scenes_skipped_no_candidates": scenes_skipped_no_candidates,
+                "scenes_failed": scenes_failed,
+                "total_positions": len(all_summaries),
+            },
+            "overall": {
+                "mean_delta": float(np.mean(all_deltas_global)) if all_deltas_global else None,
+                "success_rate": float(np.mean([d > 0.0 for d in all_deltas_global])) if all_deltas_global else None,
+                "by_target": global_agg,
+            },
+            "per_scene": per_scene_agg,
+        }
+
+        metrics_dir = output_root / "_metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = metrics_dir / "metrics.json"
+        metrics_path.write_text(json.dumps(metrics_summary, indent=2), encoding="utf-8")
+        print(f"[AHO-EVAL] metrics saved -> {metrics_path}")
 
     if config.get("close_app_after_run", True):
         simulation_app.close()

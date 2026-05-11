@@ -131,7 +131,6 @@ def main() -> None:
     from utils.occupancy_map import load_interiorgs_occupancy_map
     from utils.occupancy_overlay import save_score_field_overlay
     from utils.person_placement import ensure_scene_query_support, place_person, place_person_near_anchor
-    from utils.raycast_score import get_skeleton_joint_world_positions, score_target_joint_visibility
     from utils.replicator_tools import (
         create_camera_pool,
         iter_batches,
@@ -142,8 +141,10 @@ def main() -> None:
     )
     from utils.ring_sampling import (
         ScoreFieldPoint,
+        _has_full_width_occupancy_visibility,
         iter_shared_pair_camera_samples,
     )
+    from utils.score import read_semantic_counts
     from utils.scene_selection import check_scene_filter, resolve_scene_configs
 
     rep.set_global_seed(int(config.get("sampling", {}).get("seed", 42)))
@@ -175,6 +176,7 @@ def main() -> None:
     min_position_distance = float(sampling_cfg.get("min_position_distance_m", 3.0))
     character_min_obstacle = float(sampling_cfg.get("character_min_obstacle_distance_m", 0.2))
     max_attempts = max(1, int(sampling_cfg.get("max_attempts_per_position", 2)))
+    body_width_m = float(score_field_cfg["occupancy_full_visibility_width_m"])
     min_camera_distance_to_any_person = float(
         score_field_cfg.get("min_camera_distance_to_any_person_m", score_field_cfg["min_radius_m"])
     )
@@ -298,117 +300,6 @@ def main() -> None:
         def _end_render_pass():
             set_render_products_updates_enabled(render_products, False)
 
-        def _save_score_field_target_views(
-            *,
-            pos_dir: Path,
-            pos_tag: str,
-            target: dict,
-            target_poses: list[dict],
-            score_field: list[ScoreFieldPoint],
-        ) -> None:
-            if not save_score_field_views:
-                return
-            if not target_poses:
-                return
-
-            target_id = str(target["instance_id"])
-            target_label = str(target["semantic_label"])
-            target_dir = pos_dir / "score_field_views" / target_id
-            point_by_candidate_id = {
-                int(item.candidate_id): item
-                for item in score_field
-                if item.candidate_id is not None
-            }
-            manifest_records: list[dict] = []
-            records_by_candidate_id: dict[int, dict] = {}
-
-            for pose in target_poses:
-                candidate_id = int(pose["candidate_id"])
-                stem = f"{candidate_id:06d}"
-                point = point_by_candidate_id.get(candidate_id)
-                quat = _yaw_to_world_quaternion(float(pose["yaw_rad"]))
-                record = {
-                    "candidate_id": candidate_id,
-                    "candidate_key": [round(float(pose["x"]), 6), round(float(pose["y"]), 6)],
-                    "target_id": target_id,
-                    "target_semantic_label": target_label,
-                    "camera_position": [float(pose["x"]), float(pose["y"]), float(pose["camera_z"])],
-                    "camera_orientation_wxyz": [float(v) for v in quat],
-                    "x": float(pose["x"]),
-                    "y": float(pose["y"]),
-                    "z": float(pose["z"]),
-                    "camera_z": float(pose["camera_z"]),
-                    "yaw_rad": float(pose["yaw_rad"]),
-                    "distance_m": float(pose["distance_m"]),
-                    "raycast_score": float(point.score) if point is not None else None,
-                    "scoring_mode": point.scoring_mode if point is not None else "missing",
-                    "rgb_path": str(target_dir / "rgb" / f"{stem}.png") if score_field_views_save_rgb else None,
-                    "depth_path": str(target_dir / "depth" / f"{stem}.png") if score_field_views_save_depth else None,
-                    "depth_npy_path": str(target_dir / "depth" / f"{stem}.npy") if score_field_views_save_depth else None,
-                    "bbox_path": str(target_dir / "bbox" / f"{stem}.json") if score_field_views_save_bbox else None,
-                    "bbox_valid": None,
-                }
-                manifest_records.append(record)
-                records_by_candidate_id[candidate_id] = record
-
-            print(f"[SDG] {pos_tag} / {target_id} saving {len(target_poses)} score-field target-facing view(s)...")
-
-            if score_field_views_save_rgb:
-                _begin_render_pass(scene_mesh_visible=False)
-                for batch_idx, batch in enumerate(iter_batches(target_poses, num_cameras)):
-                    set_batch_poses_with_orientation(driver_cams, batch)
-                    rep.orchestrator.step(rt_subframes=rt_subframes)
-                    for i, pose in enumerate(batch):
-                        candidate_id = int(pose["candidate_id"])
-                        stem = f"{candidate_id:06d}"
-                        _save_rgb(
-                            np.asarray(rgb_annotators[i].get_data()),
-                            target_dir / "rgb" / f"{stem}.png",
-                        )
-                    print(f"[SDG]   {target_id} score-field RGB batch {batch_idx}: {len(batch)} poses")
-                _end_render_pass()
-
-            if score_field_views_save_depth or score_field_views_save_bbox:
-                _begin_render_pass(scene_mesh_visible=True)
-                for batch_idx, batch in enumerate(iter_batches(target_poses, num_cameras)):
-                    set_batch_poses_with_orientation(driver_cams, batch)
-                    rep.orchestrator.step(rt_subframes=rt_subframes)
-                    for i, pose in enumerate(batch):
-                        candidate_id = int(pose["candidate_id"])
-                        stem = f"{candidate_id:06d}"
-                        record = records_by_candidate_id[candidate_id]
-                        if score_field_views_save_depth:
-                            _save_depth(
-                                np.asarray(depth_annotators[i].get_data(), dtype=np.float32),
-                                target_dir / "depth" / f"{stem}.png",
-                                target_dir / "depth" / f"{stem}.npy",
-                            )
-                        if score_field_views_save_bbox:
-                            seg_frame = seg_annotators[i].get_data()
-                            bbox_xyxy = _semantic_bbox_xyxy(seg_frame, target_label)
-                            record["bbox_valid"] = bbox_xyxy is not None
-                            _save_person_bbox_norm(
-                                target_dir / "bbox" / f"{stem}.json",
-                                bbox_xyxy,
-                                image_width=int(resolution[0]),
-                                image_height=int(resolution[1]),
-                            )
-                    print(f"[SDG]   {target_id} score-field depth/bbox batch {batch_idx}: {len(batch)} poses")
-                _end_render_pass()
-
-            target_dir.mkdir(parents=True, exist_ok=True)
-            (target_dir / "manifest.json").write_text(
-                json.dumps(manifest_records, indent=2), encoding="utf-8"
-            )
-            if score_field_views_save_metadata:
-                metadata_dir = target_dir / "metadata"
-                metadata_dir.mkdir(parents=True, exist_ok=True)
-                for record in manifest_records:
-                    stem = f"{int(record['candidate_id']):06d}"
-                    (metadata_dir / f"{stem}.json").write_text(
-                        json.dumps(record, indent=2), encoding="utf-8"
-                    )
-            set_prim_visibility(stage, "/World/scene_collision", visible=True)
 
         existing_world_points_xy: list[tuple[float, float]] = []
         person_prim_path = "/SDG/Persons/person_000"
@@ -555,13 +446,10 @@ def main() -> None:
                     return (round(float(x), 6), round(float(y), 6))
 
                 target_results: dict[str, dict] = {}
-                set_prim_visibility(stage, "/World/scene_collision", visible=True)
-                for _ in range(warmup_updates):
-                    simulation_app.update()
                 for target in targets:
                     target_id = str(target["instance_id"])
+                    target_semantic_label = str(target["semantic_label"])
                     target_person_xyz = target["position"]
-                    target_joints = get_skeleton_joint_world_positions(stage, str(target["prim_path"]))
 
                     target_poses = []
                     for pose in shared_ring_samples:
@@ -571,32 +459,160 @@ def main() -> None:
                         )
                         target_poses.append({**pose, "yaw_rad": float(yaw_rad)})
 
+                    certain_indices: list[int] = []
+                    uncertain_indices: list[int] = []
+                    for i, pose in enumerate(target_poses):
+                        if _has_full_width_occupancy_visibility(
+                            occupancy_map=occupancy_map,
+                            person_position_xy=(target_person_xyz[0], target_person_xyz[1]),
+                            camera_position_xy=(pose["x"], pose["y"]),
+                            body_width_m=body_width_m,
+                        ):
+                            certain_indices.append(i)
+                        else:
+                            uncertain_indices.append(i)
+                    certain_set = set(certain_indices)
+                    print(
+                        f"[SDG] {pos_tag} / {target_id} occupancy shortcut: "
+                        f"{len(certain_indices)} certain, {len(uncertain_indices)} uncertain -> rendering."
+                    )
+
+                    # When saving views render all poses; otherwise only uncertain poses need rendering.
+                    render_poses = target_poses if save_score_field_views else [target_poses[i] for i in uncertain_indices]
+
+                    # Manifest records for score_field_views (built before rendering so paths are known).
+                    target_dir = pos_dir / "score_field_views" / target_id
+                    manifest_records: list[dict] = []
+                    records_by_candidate_id: dict[int, dict] = {}
+                    if save_score_field_views:
+                        for pose in target_poses:
+                            candidate_id = int(pose["candidate_id"])
+                            stem = f"{candidate_id:06d}"
+                            quat = _yaw_to_world_quaternion(float(pose["yaw_rad"]))
+                            record = {
+                                "candidate_id": candidate_id,
+                                "candidate_key": [round(float(pose["x"]), 6), round(float(pose["y"]), 6)],
+                                "target_id": target_id,
+                                "target_semantic_label": target_semantic_label,
+                                "camera_position": [float(pose["x"]), float(pose["y"]), float(pose["camera_z"])],
+                                "camera_orientation_wxyz": [float(v) for v in quat],
+                                "x": float(pose["x"]),
+                                "y": float(pose["y"]),
+                                "z": float(pose["z"]),
+                                "camera_z": float(pose["camera_z"]),
+                                "yaw_rad": float(pose["yaw_rad"]),
+                                "distance_m": float(pose["distance_m"]),
+                                "seg_score": None,
+                                "scoring_mode": None,
+                                "rgb_path": str(target_dir / "rgb" / f"{stem}.png") if score_field_views_save_rgb else None,
+                                "depth_path": str(target_dir / "depth" / f"{stem}.png") if score_field_views_save_depth else None,
+                                "depth_npy_path": str(target_dir / "depth" / f"{stem}.npy") if score_field_views_save_depth else None,
+                                "bbox_path": str(target_dir / "bbox" / f"{stem}.json") if score_field_views_save_bbox else None,
+                                "bbox_valid": None,
+                            }
+                            manifest_records.append(record)
+                            records_by_candidate_id[candidate_id] = record
+
+                    # Counts indexed by position in render_poses.
+                    total_counts: list[int] = []
+                    visible_counts: list[int] = []
+
+                    if render_poses:
+                        n_views = len(render_poses)
+                        print(f"[SDG] {pos_tag} / {target_id} Pass 1 (mesh hidden): {n_views} views"
+                              + (" + saving RGB" if save_score_field_views and score_field_views_save_rgb else "") + "...")
+                        _begin_render_pass(scene_mesh_visible=False)
+                        pass1_start = time.perf_counter()
+                        for batch in iter_batches(render_poses, num_cameras):
+                            set_batch_poses_with_orientation(driver_cams, batch)
+                            rep.orchestrator.step(rt_subframes=rt_subframes)
+                            batch_seg = read_semantic_counts(seg_annotators, target_semantic_label)
+                            total_counts.extend(batch_seg[: len(batch)])
+                            if save_score_field_views and score_field_views_save_rgb:
+                                for i, pose in enumerate(batch):
+                                    candidate_id = int(pose["candidate_id"])
+                                    _save_rgb(
+                                        np.asarray(rgb_annotators[i].get_data()),
+                                        target_dir / "rgb" / f"{candidate_id:06d}.png",
+                                    )
+                        _end_render_pass()
+                        print(f"[SDG] {pos_tag} / {target_id} Pass 1 elapsed: {time.perf_counter() - pass1_start:.3f}s")
+
+                        save_pass2_views = save_score_field_views and (score_field_views_save_bbox or score_field_views_save_depth)
+                        print(f"[SDG] {pos_tag} / {target_id} Pass 2 (mesh visible): {n_views} views"
+                              + (" + saving bbox/depth" if save_pass2_views else "") + "...")
+                        _begin_render_pass(scene_mesh_visible=True)
+                        pass2_start = time.perf_counter()
+                        for batch in iter_batches(render_poses, num_cameras):
+                            set_batch_poses_with_orientation(driver_cams, batch)
+                            rep.orchestrator.step(rt_subframes=rt_subframes)
+                            batch_seg = read_semantic_counts(seg_annotators, target_semantic_label)
+                            visible_counts.extend(batch_seg[: len(batch)])
+                            if save_pass2_views:
+                                for i, pose in enumerate(batch):
+                                    candidate_id = int(pose["candidate_id"])
+                                    stem = f"{candidate_id:06d}"
+                                    record = records_by_candidate_id[candidate_id]
+                                    if score_field_views_save_depth:
+                                        _save_depth(
+                                            np.asarray(depth_annotators[i].get_data(), dtype=np.float32),
+                                            target_dir / "depth" / f"{stem}.png",
+                                            target_dir / "depth" / f"{stem}.npy",
+                                        )
+                                    if score_field_views_save_bbox:
+                                        seg_frame = seg_annotators[i].get_data()
+                                        bbox_xyxy = _semantic_bbox_xyxy(seg_frame, target_semantic_label)
+                                        record["bbox_valid"] = bbox_xyxy is not None
+                                        _save_person_bbox_norm(
+                                            target_dir / "bbox" / f"{stem}.json",
+                                            bbox_xyxy,
+                                            image_width=int(resolution[0]),
+                                            image_height=int(resolution[1]),
+                                        )
+                        _end_render_pass()
+                        print(f"[SDG] {pos_tag} / {target_id} Pass 2 elapsed: {time.perf_counter() - pass2_start:.3f}s")
+
+                    # Map candidate_id -> index in render_poses for count lookup.
+                    render_idx = {int(p["candidate_id"]): j for j, p in enumerate(render_poses)}
+
                     score_field: list[ScoreFieldPoint] = []
-                    print(f"[SDG] {pos_tag} / {target_id} raycast scoring {len(target_poses)} poses...")
-                    score_start = time.perf_counter()
-                    for pose in target_poses:
-                        ray_score = score_target_joint_visibility(
-                            query=scene_query,
-                            camera_xyz=(float(pose["x"]), float(pose["y"]), float(pose["camera_z"])),
-                            camera_yaw_rad=float(pose["yaw_rad"]),
-                            resolution=resolution,
-                            focal_length=focal_length,
-                            horizontal_aperture=horizontal_aperture,
-                            vertical_aperture=vertical_aperture,
-                            target_prim_path=str(target["prim_path"]),
-                            joints=target_joints,
+                    for i, pose in enumerate(target_poses):
+                        candidate_id = int(pose["candidate_id"])
+                        if i in certain_set:
+                            vis, total, score, mode = 1, 1, 1.0, "occupancy_full_visibility"
+                        else:
+                            j = render_idx[candidate_id]
+                            vis = int(visible_counts[j]) if visible_counts else 0
+                            total = int(total_counts[j]) if total_counts else 0
+                            score = float(vis) / float(total) if total > 0 else 0.0
+                            mode = "segmentation_visibility"
+                        score_field.append(ScoreFieldPoint(
+                            x=pose["x"], y=pose["y"], z=pose["z"],
+                            camera_z=pose["camera_z"], yaw_rad=pose["yaw_rad"],
+                            score=score, distance_m=pose["distance_m"],
+                            visible_person_pixels=vis, total_person_pixels=total,
+                            scoring_mode=mode,
+                            candidate_id=candidate_id,
+                        ))
+                        if save_score_field_views:
+                            rec = records_by_candidate_id[candidate_id]
+                            rec["seg_score"] = score
+                            rec["scoring_mode"] = mode
+
+                    if save_score_field_views and manifest_records:
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        (target_dir / "manifest.json").write_text(
+                            json.dumps(manifest_records, indent=2), encoding="utf-8"
                         )
-                        score_field.append(
-                            ScoreFieldPoint(
-                                x=pose["x"], y=pose["y"], z=pose["z"],
-                                camera_z=pose["camera_z"], yaw_rad=pose["yaw_rad"],
-                                score=float(ray_score.score), distance_m=pose["distance_m"],
-                                scoring_mode="raycast_skeleton_joint_visibility",
-                                candidate_id=int(pose["candidate_id"]),
-                            )
-                        )
-                    score_elapsed = time.perf_counter() - score_start
-                    print(f"[SDG] {pos_tag} / {target_id} raycast scoring elapsed: {score_elapsed:.3f}s")
+                        if score_field_views_save_metadata:
+                            metadata_dir = target_dir / "metadata"
+                            metadata_dir.mkdir(parents=True, exist_ok=True)
+                            for record in manifest_records:
+                                stem = f"{int(record['candidate_id']):06d}"
+                                (metadata_dir / f"{stem}.json").write_text(
+                                    json.dumps(record, indent=2), encoding="utf-8"
+                                )
+                        set_prim_visibility(stage, "/World/scene_collision", visible=True)
 
                     target_results[target_id] = {
                         "target": target,
@@ -611,13 +627,6 @@ def main() -> None:
                         selected_candidates=None,
                     )
                     print(f"[SDG] {pos_tag} / {target_id} wrote shared-domain overlay to {overlay_path}")
-                    _save_score_field_target_views(
-                        pos_dir=pos_dir,
-                        pos_tag=pos_tag,
-                        target=target,
-                        target_poses=target_poses,
-                        score_field=score_field,
-                    )
 
                 shared_rng = np.random.default_rng(base_seed + pos_idx * 7919)
 

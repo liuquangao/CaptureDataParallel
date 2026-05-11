@@ -33,7 +33,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchreid
 import torchvision.transforms as T
 from PIL import Image
 
@@ -43,37 +42,52 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.capture_outputs import _compute_score_map
 
+_SSL_REPO = Path("/home/leo/FusionLab/ReID/TransReID-SSL/transreid_pytorch")
+sys.path.insert(0, str(_SSL_REPO))
+from model.backbones.vit_pytorch import vit_base_patch16_224_TransReID
+
+_REID_WEIGHT = Path("/home/leo/FusionLab/ReID/weights/transformer_120.pth")
+_IMG_SIZE = (384, 128)
+
 # person_id → reference character folder name (matches run_collector config order)
 PERSON_TO_CHAR = {
     "person_000": "F_Business_02",
     "person_001": "male_adult_medical_01",
 }
-NUM_REFS = 8
+NUM_REFS = 1
+REF_IDX  = 6   # use only ref_06.png
 
 
 # ── ReID feature extractor ────────────────────────────────────────────────────
 
 class ReIDScorer:
-    def __init__(self, model_name: str = "osnet_ain_x1_0", device: str = "auto"):
+    def __init__(self, device: str = "auto"):
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
-        self.model = torchreid.models.build_model(model_name, num_classes=1000, pretrained=True)
-        self.model.eval().to(self.device)
+        model = vit_base_patch16_224_TransReID(
+            img_size=_IMG_SIZE, stride_size=16, camera=0, view=0,
+            local_feature=False, sie_xishu=1.5, drop_path_rate=0.1,
+            stem_conv=True,
+        )
+        ckpt = torch.load(_REID_WEIGHT, map_location="cpu")
+        backbone_state = {k[len("base."):]: v for k, v in ckpt.items() if k.startswith("base.")}
+        model.load_state_dict(backbone_state, strict=False)
+        self.model = model.to(self.device).eval()
 
         self.transform = T.Compose([
-            T.Resize((256, 128)),
+            T.Resize(_IMG_SIZE, interpolation=T.InterpolationMode.BICUBIC),
             T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         ])
 
     def extract_batch(self, imgs: list[Image.Image]) -> torch.Tensor:
         """Returns (N, D) normalized feature tensor."""
         tensors = torch.stack([self.transform(img) for img in imgs]).to(self.device)
         with torch.no_grad():
-            feats = self.model(tensors)
+            feats = self.model(tensors, cam_label=None, view_label=None)
         return F.normalize(feats, dim=1)
 
 
@@ -81,14 +95,11 @@ class ReIDScorer:
 
 def load_ref_features(scorer: ReIDScorer, ref_dir: Path) -> Optional[torch.Tensor]:
     """Load ref_00.png..ref_07.png, return (8, D) normalized tensor or None."""
-    imgs = []
-    for i in range(NUM_REFS):
-        p = ref_dir / f"ref_{i:02d}.png"
-        if not p.exists():
-            print(f"  [WARN] missing reference image: {p}")
-            return None
-        imgs.append(Image.open(p).convert("RGB"))
-    return scorer.extract_batch(imgs)   # (8, D)
+    p = ref_dir / f"ref_{REF_IDX:02d}.png"
+    if not p.exists():
+        print(f"  [WARN] missing reference image: {p}")
+        return None
+    return scorer.extract_batch([Image.open(p).convert("RGB")])   # (1, D)
 
 
 def crop_bbox(rgb_path: str, bbox_path: str) -> Optional[Image.Image]:
@@ -194,7 +205,7 @@ def process_pos(pos_dir: Path,
         # Check if already done
         out_base = pos_dir / "reid_score_map" / person_id
         if not force and out_base.exists():
-            existing = list(out_base.glob("ref_*/**.npy"))
+            existing = list(out_base.glob("ref_*/*.npy"))
             if existing:
                 print(f"    [SKIP] {person_id}: reid_score_map already exists")
                 continue
@@ -222,62 +233,81 @@ def process_pos(pos_dir: Path,
         observations      = meta["observations"]
 
         # ── 4. For each reference, build score_maps ───────────────────────
-        for ref_j in range(NUM_REFS):
-            ref_feat = ref_feats[ref_j:ref_j + 1]   # (1, D)
+        # Use only REF_IDX; NUM_REFS=1 so ref_j=0 always.
+        ref_feat = ref_feats[0:1]   # (1, D)
 
-            # Cosine similarity for every candidate
-            score_field: list[_ScoreItem] = []
-            for cand in candidates:
-                if cand.feat is not None:
-                    score = float((cand.feat @ ref_feat.T).squeeze())
-                    score = max(0.0, score)   # clamp negatives to 0
-                else:
-                    score = 0.0
-                score_field.append(_ScoreItem(
-                    x=cand.x, y=cand.y, z=cand.z,
-                    score=score, yaw_rad=cand.yaw_rad,
-                ))
+        # Cosine similarity for every candidate; build key→score lookup
+        score_field: list[_ScoreItem] = []
+        key_to_reid: dict[tuple, float] = {}
+        for cand in candidates:
+            if cand.feat is not None:
+                score = float((cand.feat @ ref_feat.T).squeeze())
+                score = max(0.0, score)
+            else:
+                score = 0.0
+            score_field.append(_ScoreItem(
+                x=cand.x, y=cand.y, z=cand.z,
+                score=score, yaw_rad=cand.yaw_rad,
+            ))
+            key_to_reid[cand.key] = score
 
-            # One score_map per observation frame
-            for obs in observations:
-                stem = f"{obs['idx']:03d}"
-                out_path = out_base / f"ref_{ref_j:02d}" / f"{stem}.npy"
-                if not force and out_path.exists():
-                    continue
-                out_path.parent.mkdir(parents=True, exist_ok=True)
+        # One score_map per observation frame
+        for obs in observations:
+            stem = f"{obs['idx']:03d}"
+            out_path = out_base / f"ref_{REF_IDX:02d}" / f"{stem}.npy"
+            if not force and out_path.exists():
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
 
-                depth      = np.load(obs["depth_npy_path"]).astype(np.float32)
-                ground_mask = load_ground_mask(obs["ground_mask_path"])
+            depth       = np.load(obs["depth_npy_path"]).astype(np.float32)
+            ground_mask = load_ground_mask(obs["ground_mask_path"])
 
-                score_map, valid_mask, _ = _compute_score_map(
-                    score_field=score_field,
-                    depth_m=depth,
-                    ground_mask=ground_mask,
-                    camera_position=tuple(obs["camera_position"]),
-                    camera_orientation_wxyz=tuple(obs["camera_orientation_wxyz"]),
-                    resolution=resolution,
-                    focal_length=focal_length,
-                    horizontal_aperture=h_aperture,
-                    vertical_aperture=v_aperture,
-                )
-                np.save(str(out_path), score_map)
+            score_map, valid_mask, _ = _compute_score_map(
+                score_field=score_field,
+                depth_m=depth,
+                ground_mask=ground_mask,
+                camera_position=tuple(obs["camera_position"]),
+                camera_orientation_wxyz=tuple(obs["camera_orientation_wxyz"]),
+                resolution=resolution,
+                focal_length=focal_length,
+                horizontal_aperture=h_aperture,
+                vertical_aperture=v_aperture,
+            )
+            np.save(str(out_path), score_map)
 
-        print(f"    {person_id}: saved reid_score_map/ref_00..ref_{NUM_REFS-1:02d}/")
+        print(f"    {person_id}: saved reid_score_map/ref_{REF_IDX:02d}/")
 
-        # ── 5. Sanity check: compare coverage with raycast score_map ──────
+        # ── 5. Write back reid scores ─────────────────────────────────────
+        reid_scores_dict: dict[str, float] = {}
+        for obs in observations:
+            key = tuple(obs["candidate_key"])
+            reid = key_to_reid.get(key, 0.0)
+            obs["reid_score"] = reid
+            reid_scores_dict[f"{obs['idx']:03d}.png"] = reid
+
+        # Save reid_scores/person_XXX.json
+        reid_scores_dir = pos_dir / "reid_scores"
+        reid_scores_dir.mkdir(exist_ok=True)
+        reid_scores_path = reid_scores_dir / f"{person_id}.json"
+        reid_scores_path.write_text(json.dumps(reid_scores_dict, indent=2))
+
+        # Write back metadata
+        meta_path.write_text(json.dumps(meta, indent=2))
+
+        # ── 6. Sanity check: compare coverage with raycast score_map ──────
         _sanity_check(pos_dir, person_id, observations)
 
 
 def _sanity_check(pos_dir: Path, person_id: str, observations: list) -> None:
     """Print IoU of nonzero pixels between reid_score_map and raycast score_map."""
-    ref0_maps = sorted((pos_dir / "reid_score_map" / person_id / "ref_00").glob("*.npy"))
+    ref0_maps = sorted((pos_dir / "reid_score_map" / person_id / f"ref_{REF_IDX:02d}").glob("*.npy"))
     if not ref0_maps:
         return
     ious = []
     for obs in observations:
         stem = f"{obs['idx']:03d}"
         raycast_path = Path(obs["score_map_path"])
-        reid_path    = pos_dir / "reid_score_map" / person_id / "ref_00" / f"{stem}.npy"
+        reid_path    = pos_dir / "reid_score_map" / person_id / f"ref_{REF_IDX:02d}" / f"{stem}.npy"
         if not raycast_path.exists() or not reid_path.exists():
             continue
         raycast = np.load(str(raycast_path)) > 0
@@ -298,7 +328,6 @@ def parse_args() -> argparse.Namespace:
                    default="outputs_parallel-v2-raycasted")
     p.add_argument("--reference_dir", type=str,
                    default="outputs_parallel-v2-raycasted/reference")
-    p.add_argument("--reid_model", type=str, default="osnet_ain_x1_0")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--force", action="store_true")
@@ -312,8 +341,8 @@ def main() -> None:
     dataset_dir   = Path(args.dataset_dir)
     reference_dir = Path(args.reference_dir)
 
-    print(f"Loading ReID model: {args.reid_model}")
-    scorer = ReIDScorer(model_name=args.reid_model, device=args.device)
+    print(f"Loading ReID model: TransReID-SSL ViT-B/16 ({_REID_WEIGHT.name})")
+    scorer = ReIDScorer(device=args.device)
 
     if args.scene_id:
         scene_dirs = [dataset_dir / args.scene_id]
