@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compute ReID similarity before/after for AHO active eval outputs.
+Compute ReID similarity before/after for A active eval outputs.
 
 For each scene/pos/view:
   - Crop person from before/rgb.png using before/bbox_person_XXX.json
@@ -10,7 +10,7 @@ For each scene/pos/view:
 
 Usage:
     python script/compute_reid_eval.py \
-        --eval_dir outputs_aho_active_eval_isaac_two_people \
+        --eval_dir outputs_ActiveReID_active_eval_isaac_two_people \
         --reference_dir outputs_parallel-v2-raycasted/reference \
         [--ref_idx 6] \
         [--reid_model osnet_ain_x1_0]
@@ -97,7 +97,7 @@ def cosine_sim(a: torch.Tensor, b: torch.Tensor) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval_dir", type=str,
-                        default="outputs_aho_active_eval_isaac_two_people")
+                        default="outputs_ActiveReID_active_eval_isaac_two_people")
     parser.add_argument("--reference_dir", type=str,
                         default="outputs_parallel-v2-raycasted/reference")
     parser.add_argument("--ref_idx", type=int, default=6)
@@ -136,10 +136,9 @@ def main() -> None:
                     after_rgb = view_dir / f"after_{person_id}" / "rgb.png"
                     after_bbox = view_dir / f"after_{person_id}" / f"bbox_{person_id}.json"
 
-                    # Skip if before score >= 0.8 (already good, not informative)
                     record = json.loads((view_dir / "record.json").read_text())
-                    before_score = record.get("targets", {}).get(person_id, {}).get("before_score")
-                    if before_score is None or before_score >= 0.8:
+                    visibility_score = record.get("targets", {}).get(person_id, {}).get("before_score")
+                    if visibility_score is None:
                         continue
 
                     before_crop = crop_bbox(before_rgb, before_bbox)
@@ -157,6 +156,7 @@ def main() -> None:
                         "scene": scene_dir.name,
                         "pos": pos_dir.name,
                         "view": view_dir.name,
+                        "visibility_score": float(visibility_score),
                         "before_reid": before_sim,
                         "after_reid": after_sim,
                         "delta": after_sim - before_sim,
@@ -202,6 +202,7 @@ def main() -> None:
                 "delta_mean":  float(np.mean([r["delta"]       for r in results[person_id]])) if results[person_id] else None,
                 "delta_std":   float(np.std( [r["delta"]       for r in results[person_id]])) if results[person_id] else None,
                 "success_rate": float(np.mean([r["delta"] > 0  for r in results[person_id]])) if results[person_id] else None,
+                "views": results[person_id],
             }
             for person_id in PERSON_TO_CHAR
         },

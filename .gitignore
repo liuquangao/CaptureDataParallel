@@ -34,3 +34,7 @@ outputs_aho_active_eval_visibility_only/
 
 AGENTS.md
 CLAUDE.md
+
+outputs_aho_active_eval_single_visibility/
+outputs_aho_active_eval_single_avg/
+outputs_aho_active_eval_single_reid/
